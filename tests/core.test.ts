@@ -240,4 +240,3 @@ test("le mode démo initialise des données fictives sans navigateur", () => {
     store.close();
   }
 });
-

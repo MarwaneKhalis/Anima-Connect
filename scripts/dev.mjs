@@ -18,4 +18,3 @@ function stop(code = 0) {
 for (const child of children) child.on("exit", (code) => stop(code ?? 1));
 process.on("SIGINT", () => stop());
 process.on("SIGTERM", () => stop());
-

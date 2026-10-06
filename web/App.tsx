@@ -12,7 +12,7 @@ import {
   type Template,
 } from "../src/shared/types.ts";
 
-type Tab =
+export type Tab =
   | "accueil"
   | "recherches"
   | "prospects"
@@ -138,11 +138,13 @@ const filterText = (f: SearchFilters) => ({
   industries: fmtList(f.industries),
 });
 
-export default function App() {
-  const [tab, setTab] = useState<Tab>("accueil");
+export default function App({ initialTab = "accueil", demoMode, embedded = false }: {initialTab?: Tab; demoMode?: boolean; embedded?: boolean} = {}) {
+  const [tab, setTab] = useState<Tab>(initialTab);
+  useEffect(() => setTab(initialTab), [initialTab]);
   const [demo, setDemo] = useState(
-    () => localStorage.getItem("anima-demo") === "1",
+    () => demoMode ?? localStorage.getItem("anima-demo") === "1",
   );
+  useEffect(() => { if (demoMode !== undefined) setDemo(demoMode); }, [demoMode]);
   const [data, setData] = useState<Snapshot>(initial);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -453,7 +455,7 @@ export default function App() {
   }
 
   return (
-    <div className="shell">
+    <div className={`shell ${embedded ? "cw-legacy" : ""}`}>
       <aside className="sidebar">
         <div className="brand">
           <div className="brand-mark">
@@ -2299,4 +2301,3 @@ function Empty({
     </div>
   );
 }
-

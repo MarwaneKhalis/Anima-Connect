@@ -109,4 +109,3 @@ export const EMPTY_FILTERS: SearchFilters = {
   industries: [],
   experience: "",
 };
-

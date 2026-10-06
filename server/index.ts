@@ -18,11 +18,19 @@ import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import { LocalBrowser } from "./browser.ts";
 import { Store } from "./db.ts";
+import { CareerStore } from "./career-store.ts";
+import { Vault } from "./vault.ts";
+import { CareerBrowser } from "./career-browser.ts";
+import { CareerRunner } from "./career-runner.ts";
+import { handleCareerApi } from "./career-api.ts";
+import { JobDiscovery } from "./job-discovery.ts";
 import { csvParse, csvStringify, makeSearchUrl } from "./domain.ts";
 import type { Prospect, SavedSearch, Template } from "../src/shared/types.ts";
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
-const dataDir = join(root, "data");
+const dataDir = process.env.ANIMA_DATA_DIR
+  ? resolve(process.env.ANIMA_DATA_DIR)
+  : join(root, "data");
 mkdirSync(dataDir, { recursive: true });
 const realPath = join(dataDir, "anima-connect.sqlite");
 const demoPath = join(dataDir, "demo.sqlite");
@@ -31,6 +39,34 @@ const demoStore = new Store(demoPath);
 demoStore.seedDemo();
 const browser = new LocalBrowser(join(dataDir, "browser-profile"));
 const port = Number(process.env.PORT || 4174);
+const allowedTestOrigins: string[] =
+  process.env.ANIMA_TEST_MODE === "1"
+    ? JSON.parse(process.env.CAREER_TEST_ORIGINS || "[]")
+    : [];
+if (
+  !Array.isArray(allowedTestOrigins) ||
+  allowedTestOrigins.some(
+    (origin) =>
+      typeof origin !== "string" ||
+      !/^http:\/\/(127\.0\.0\.1|localhost):\d+$/.test(origin),
+  )
+)
+  throw new Error("Origines de test invalides.");
+const careerOptions = { allowedTestOrigins };
+const careerBrowser = new CareerBrowser({
+  ...careerOptions,
+  headless: process.env.CAREER_HEADLESS === "1",
+});
+const discovery = new JobDiscovery(allowedTestOrigins);
+let careerStore = new CareerStore(realStore.db, careerOptions);
+let vault = new Vault(realStore.db, careerOptions);
+let runner = new CareerRunner(careerStore, vault, careerBrowser);
+careerStore.recoverInterruptedRuns();
+const demoCareerStore = new CareerStore(demoStore.db);
+const demoVault = new Vault(demoStore.db);
+const demoBrowser = new CareerBrowser();
+const demoRunner = new CareerRunner(demoCareerStore, demoVault, demoBrowser);
+demoCareerStore.seedDemo();
 
 function respond(res: ServerResponse, status: number, value: unknown) {
   res.writeHead(status, {
@@ -113,6 +149,17 @@ function staticFile(pathname: string, res: ServerResponse) {
 }
 
 const server = createServer(async (req, res) => {
+  const hosts = [`127.0.0.1:${port}`, `localhost:${port}`];
+  if (
+    !hosts.includes(req.headers.host || "") ||
+    req.headers["sec-fetch-site"] === "cross-site"
+  ) {
+    respond(res, 403, {
+      error: "Requête locale non autorisée.",
+      code: "origin",
+    });
+    return;
+  }
   const url = new URL(req.url || "/", `http://127.0.0.1:${port}`);
   const path = url.pathname,
     method = req.method || "GET";
@@ -136,6 +183,17 @@ const server = createServer(async (req, res) => {
   const demo = url.searchParams.get("demo") === "1";
   const store = demo ? demoStore : realStore;
   try {
+    if (
+      await handleCareerApi(req, res, url, {
+        store: demo ? demoCareerStore : careerStore,
+        vault: demo ? demoVault : vault,
+        runner: demo ? demoRunner : runner,
+        discovery,
+        demo,
+        allowedTestOrigins,
+      })
+    )
+      return;
     if (method === "GET" && path === "/api/bootstrap") {
       respond(res, 200, {
         searches: store.listSearches(),
@@ -332,26 +390,24 @@ const server = createServer(async (req, res) => {
       return;
     }
     if (method === "GET" && path === "/api/export.csv") {
-      const rows = store
-        .listProspects()
-        .map((p) => ({
-          linkedinUrl: p.linkedinUrl,
-          firstName: p.firstName,
-          lastName: p.lastName,
-          title: p.title,
-          company: p.company,
-          location: p.location,
-          school: p.school,
-          status: p.status,
-          tags: p.tags.join("; "),
-          notes: p.notes,
-          nextAction: p.nextAction,
-          nextActionAt: p.nextActionAt,
-          createdAt: p.createdAt,
-          sources: (store.getProspect(p.id).sources || [])
-            .map((s) => s.searchName)
-            .join("; "),
-        }));
+      const rows = store.listProspects().map((p) => ({
+        linkedinUrl: p.linkedinUrl,
+        firstName: p.firstName,
+        lastName: p.lastName,
+        title: p.title,
+        company: p.company,
+        location: p.location,
+        school: p.school,
+        status: p.status,
+        tags: p.tags.join("; "),
+        notes: p.notes,
+        nextAction: p.nextAction,
+        nextActionAt: p.nextActionAt,
+        createdAt: p.createdAt,
+        sources: (store.getProspect(p.id).sources || [])
+          .map((s) => s.searchName)
+          .join("; "),
+      }));
       download(
         res,
         `anima-connect-${new Date().toISOString().slice(0, 10)}.csv`,
@@ -384,14 +440,12 @@ const server = createServer(async (req, res) => {
         results.push(
           ...store.importProspects(
             input.searchId,
-            rows
-              .slice(i, i + 100)
-              .map((row) => ({
-                ...row,
-                tags: row.tags
-                  ? row.tags.split(";").map((tag) => tag.trim())
-                  : [],
-              })),
+            rows.slice(i, i + 100).map((row) => ({
+              ...row,
+              tags: row.tags
+                ? row.tags.split(";").map((tag) => tag.trim())
+                : [],
+            })),
           ),
         );
       respond(res, 200, {
@@ -439,6 +493,9 @@ const server = createServer(async (req, res) => {
           )
         )
           throw new Error("Sauvegarde Anima Connect incomplète.");
+        await runner.stop();
+        vault.lock();
+        await browser.close();
         realStore.close();
         const rollback = join(
           dataDir,
@@ -448,9 +505,17 @@ const server = createServer(async (req, res) => {
         try {
           renameSync(temp, realPath);
           realStore = new Store(realPath);
+          careerStore = new CareerStore(realStore.db, careerOptions);
+          vault = new Vault(realStore.db, careerOptions);
+          runner = new CareerRunner(careerStore, vault, careerBrowser);
+          careerStore.recoverInterruptedRuns();
         } catch (error) {
           copyFileSync(rollback, realPath);
           realStore = new Store(realPath);
+          careerStore = new CareerStore(realStore.db, careerOptions);
+          vault = new Vault(realStore.db, careerOptions);
+          runner = new CareerRunner(careerStore, vault, careerBrowser);
+          careerStore.recoverInterruptedRuns();
           throw error;
         }
         respond(res, 200, { restored: true, safetyCopy: rollback });
@@ -468,10 +533,15 @@ const server = createServer(async (req, res) => {
 server.listen(port, "127.0.0.1", () =>
   console.log(`Anima Connect : http://127.0.0.1:${port}`),
 );
-process.on("SIGINT", async () => {
+async function shutdown() {
+  await runner.stop();
+  await demoRunner.stop();
+  vault.lock();
+  demoVault.lock();
   await browser.close();
   server.close();
   realStore.close();
   demoStore.close();
-});
-
+}
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);

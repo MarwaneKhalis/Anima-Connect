@@ -14,4 +14,3 @@
   },
   "include": ["server", "src", "web", "tests", "vite.config.ts"]
 }
-

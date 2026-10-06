@@ -1,4 +1,7 @@
 node_modules/
+.playwright-browsers/
+.worktrees/
+artifacts/
 .pnpm-store/
 dist/
 data/
@@ -18,4 +21,3 @@ test-results/
 *.bak
 *.backup
 .DS_Store
-
