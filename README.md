@@ -1,76 +1,76 @@
 # Anima Connect
 
-Un carnet local de prospection LinkedIn, en français, pour une seule personne. L’application garde vos recherches, prospects, brouillons, rappels et événements dans une base SQLite sur votre ordinateur. Elle ne demande aucun compte cloud ni mot de passe LinkedIn.
+Espace carrière local en français : offres, candidatures, profil, CV multiples, comptes carrière chiffrés et prospection LinkedIn dans une application. React, TypeScript, Node.js 24, SQLite et Chromium.
 
-## Démarrer sur Windows
+## Démarrer
 
-1. Installez **Node.js 24 ou plus récent** depuis [nodejs.org](https://nodejs.org/), puis ouvrez PowerShell dans ce dossier.
-2. Installez les dépendances et Chromium :
+Dans PowerShell, avec Node.js **24 ou supérieur** :
 
-   ```powershell
-   npm install --global pnpm
-   pnpm install
-   pnpm exec playwright install chromium
-   ```
+```powershell
+npm install --global pnpm
+pnpm install --frozen-lockfile
+pnpm exec playwright install chromium
+pnpm build
+pnpm start
+```
 
-3. Lancez l’application :
+Ouvrir [Anima Connect](http://127.0.0.1:4174). Pour développer : `pnpm dev`, puis [localhost:5173](http://127.0.0.1:5173). Le serveur écoute uniquement sur `127.0.0.1`. La démo utilise des données fictives séparées et désactive les connexions et envois externes.
 
-   ```powershell
-   pnpm dev
-   ```
+## Parcours complet
 
-4. Ouvrez **http://127.0.0.1:5173**. Pour découvrir l’interface sans toucher à vos données, cliquez sur **Activer le mode démo** en bas de la barre latérale. La démo contient uniquement des personnes et entreprises inventées.
+1. **Profil & CV** : enregistrer identité, coordonnées, parcours, préférences, réponses personnelles et fichiers PDF/DOCX (10 Mio maximum). Choisir un CV selon l'offre.
+2. **Comptes carrière** : créer un coffre avec une phrase secrète de 12 caractères minimum et enregistrer les comptes existants des portails. L'origine HTTPS doit correspondre exactement au site de connexion. La phrase n'est pas enregistrée ; le coffre se verrouille au redémarrage.
+3. **Offres** : importer un tableau Greenhouse/Lever ou une page `JobPosting` JSON-LD. Import dédoublonné, 200 offres maximum. Ajout direct d'une URL également disponible.
+4. **Candidatures** : choisir offre et CV. **Préparer sans envoyer** parcourt le formulaire sans clic final. **Postuler automatiquement** lance Chromium, se connecte si nécessaire, remplit les champs reconnus, transmet le fichier choisi, avance dans les étapes et effectue l'envoi final.
+5. Le reçu visible est enregistré. Sans preuve après clic, la candidature devient **Envoi à vérifier** ; tout nouvel envoi reste bloqué jusqu'à une vérification humaine documentée.
+6. Un **lot sélectionné** est exécuté séquentiellement et s'arrête au premier blocage. Les candidatures envoyées quittent la sélection. L'arrêt du lot termine la candidature en cours puis interrompt le lot.
+7. Le dashboard calcule ses chiffres depuis SQLite. Notes, relances et résultats métier (entretien, offre, refus) se renseignent dans le suivi. Les réponses des employeurs ne sont pas importées depuis une messagerie.
 
-Pour un lancement sans serveur de développement : `pnpm build`, puis `pnpm start` et ouvrez **http://127.0.0.1:4174**. Fermez le terminal pour arrêter l’application.
+### Automatique et humain
 
-## Parcours d’utilisation
+| Étape           | Automatique                             | Intervention humaine                      |
+| --------------- | --------------------------------------- | ----------------------------------------- |
+| Ressources      | Réutilisation profil/CV/réponses        | Renseigner les faits et choisir le CV     |
+| Découverte      | Greenhouse/Lever/JSON-LD, dédoublonnage | Fournir la source et choisir les offres   |
+| Connexion       | Compte du coffre, origine exacte        | Compte existant et coffre déverrouillé    |
+| Candidature     | Champs reconnus, CV, étapes, clic final | Question inconnue, CAPTCHA/MFA, ambiguïté |
+| Preuve et suivi | Reçu, dates, historique, métriques      | Envoi incertain et réponse employeur      |
+| LinkedIn        | Lecture page ouverte, brouillons, suivi | Connexion, choix/import et envoi LinkedIn |
 
-1. Dans **Recherches**, créez « CTO — France », « Data Engineer — international » ou d’autres recherches. Les champs à valeurs multiples acceptent des virgules. Enregistrez la recherche.
-2. Cliquez sur **Ouvrir dans LinkedIn**. Une fenêtre Chromium visible s’ouvre. Connectez-vous vous-même, puis ajustez les filtres dans LinkedIn. Cliquez sur **Associer l’URL courante** pour retrouver cette recherche plus tard.
-3. Sur une page de résultats **Personnes** ou un profil que vous avez ouvert, cliquez sur **Lire la page courante**. L’application propose seulement les liens de profil visibles. Vérifiez et corrigez les champs, choisissez les personnes, puis importez. L’ajout manuel est disponible si la page a changé ou si un champ manque.
-4. Dans **Prospects** ou **Pipeline**, ouvrez une fiche. Modifiez son statut, ses tags, ses notes et sa prochaine action. La chronologie garde les changements. La recherche source et ses filtres au moment de l’import restent visibles.
-5. Choisissez un **Modèle** pour créer un brouillon. Relisez et modifiez le texte ; placez-le dans la **File d’actions**. Ouvrez le profil depuis la file, effectuez vous-même l’envoi dans LinkedIn, puis confirmez dans Anima Connect uniquement après avoir vérifié que le texte exact est parti au bon profil. Une invitation déjà envoyée, en attente ou incertaine bloque toute nouvelle invitation au même prospect, même après redémarrage.
-6. Si une page change, une navigation échoue ou le résultat est incertain, la file se met en pause. Après vérification sur LinkedIn, indiquez **Vérifié : envoyé** ou **Vérifié : non envoyé**. Pour une invitation acceptée ou une réponse, utilisez **Mise à jour manuelle** sur la fiche et choisissez la date constatée.
+Les formulaires HTML avec champs libellés et boutons reconnus sont pris en charge. Widgets propriétaires, inscriptions à de nouveaux comptes, SSO, CAPTCHA, MFA et parcours ambigus déclenchent un arrêt explicite. Le moteur n'invente ni faits ni consentements. Les tests ne prouvent pas la compatibilité avec tous les sites réels ; aucune candidature n'a été envoyée à un employeur pendant les vérifications.
 
-**Aucune action LinkedIn n’est déclenchée par l’import.** La file ne clique pas sur les boutons d’envoi LinkedIn et n’envoie pas de lots automatiquement. Elle sert à préparer, vérifier, ouvrir et journaliser des actions effectuées par l’utilisateur. La limite par défaut est de **10 invitations confirmées par jour**, modifiable dans **Paramètres**.
+## Prospection LinkedIn
 
-## Données et sauvegardes
+**Prospection** conserve les recherches, import de profils visibles, prospects, pipeline, modèles, file de contact et sauvegardes d'Anima Connect. Le navigateur LinkedIn est distinct du moteur carrière. Les invitations/messages LinkedIn sont effectués par l'utilisateur puis confirmés ; ils ne sont pas envoyés automatiquement dans cette version. Le blocage des invitations envoyées ou incertaines reste durable.
 
-La base réelle est `data/anima-connect.sqlite`. La démo utilise `data/demo.sqlite`. Le profil Chromium persistant est dans `data/browser-profile/`. Tous ces fichiers sont exclus de Git. Aucun cookie, export, fichier de session, secret ou donnée réelle de prospect ne doit être ajouté au dépôt. Le serveur écoute seulement sur `127.0.0.1` et n’envoie pas de télémétrie.
+## Données
 
-Dans **Paramètres** :
+- Base personnelle : `data/anima-connect.sqlite` ; démo : `data/demo.sqlite`.
+- Mots de passe carrière : **AES-256-GCM**, clé dérivée par **scrypt**, liée à l'identité et l'origine du compte. Secrets déchiffrés uniquement côté serveur. Profil, CV, identifiants et suivi stockés localement en clair.
+- Verrouiller le coffre arrête le moteur. Sans phrase secrète, les mots de passe enregistrés ne sont pas récupérables.
+- Sauvegarde/restauration SQLite : **Prospection → Sauvegardes**. Le moteur est arrêté et le coffre verrouillé avant restauration ; copie de sécurité conservée. Toutes les tables carrière sont incluses.
+- Données, sessions, exports, captures et Chromium exclus de Git.
 
-- **Exporter CSV** : prospects et champs principaux, avec les noms des recherches sources à titre de référence. L’import CSV crée ou complète les fiches ; l’URL normalisée évite les doublons. Les recherches, événements et messages ne sont pas restaurés par CSV.
-- **Sauvegarder la base** : copie SQLite complète, incluant recherches, fiches, sources, événements, modèles et messages.
-- **Restaurer** : recharge une sauvegarde SQLite Anima Connect. Une copie de la base précédente est conservée dans `data/avant-restauration-*.sqlite`.
+## Vérifier
 
-Gardez les sauvegardes en lieu sûr : elles contiennent des données personnelles en clair. Il n’y a pas de chiffrement dans ce MVP.
+```powershell
+pnpm build
+pnpm test
+```
+
+La suite utilise de vrais serveurs carrière fictifs et Chromium : PDF/DOCX et SHA-256, profil, coffre, origine des comptes, préparation sans envoi, formulaires simples/multipages, redirection ATS, champs inconnus, contrôles de sécurité, reçu, incertitude, interruption, absence de double envoi, API et interface desktop/mobile. Captures dans `artifacts/career-ui/`. La CI Windows exécute build/tests et conserve les captures.
+
+Les tests démarrent une base temporaire distincte. `ANIMA_TEST_MODE=1` autorise uniquement les origines HTTP loopback dans `CAREER_TEST_ORIGINS`. Ces options ne peuvent pas venir d'une requête UI. `ANIMA_DATA_DIR` choisit le dossier de données ; `PORT` le port HTTP ; `CAREER_HEADLESS=1` masque Chromium pendant les tests.
 
 ## Architecture
 
-- `web/` : interface React et TypeScript, servie par Vite en développement.
-- `server/index.ts` : serveur HTTP local et routes de l’application.
-- `server/db.ts` : schéma SQLite et règles métier durables, dont dédoublonnage, chronologie, limite et blocage des invitations.
-- `server/browser.ts` : adaptateur Playwright pour ouvrir Chromium visible et lire les éléments visibles sur la page courante, sans API privée LinkedIn.
-- `server/domain.ts` : URL canoniques, filtres, modèles et CSV.
-- `tests/` : tests sur données fictives, sans session LinkedIn.
+- `server/career-store.ts` : profil, fichiers, offres, états et historique.
+- `server/vault.ts` : chiffrement et contrôle d'origine.
+- `server/job-discovery.ts` : sources publiques, requêtes bornées, protection des adresses privées.
+- `server/career-browser.ts` : connexion, formulaires, fichiers, étapes et reçu.
+- `server/career-runner.ts` : exécution exclusive, marqueur durable avant clic final.
+- `server/career-api.ts` : API validée ; `server/index.ts` : intégration locale.
+- `web/CareerWorkspace.tsx` : carrière ; `web/App.tsx` : prospection.
+- [Spécification](docs/CAREER_ARCHITECTURE.md).
 
-Node.js 24 fournit le module `node:sqlite`, ce qui évite une dépendance SQLite native à compiler sur Windows. Le navigateur est lancé uniquement à la demande. Aucune opération navigateur n’est faite en mode démo.
-
-## Étude technique et limites LinkedIn
-
-L’[aide officielle LinkedIn sur la recherche de personnes](https://www.linkedin.com/help/linkedin/answer/a525054) décrit les filtres via l’interface, dont lieu, entreprise, école, secteur et mots-clés. Elle ne documente pas de format d’URL stable pour préremplir tous ces filtres. Anima Connect construit uniquement une URL de recherche ordinaire à partir des mots-clés et intitulés, puis conserve l’URL de la recherche que vous avez réglée dans LinkedIn. Ce choix évite de dépendre de paramètres internes non documentés. Les résultats et le contenu visible peuvent varier ; la lecture des cartes est donc une aide à la saisie, toujours à vérifier.
-
-Les [conditions d’utilisation de LinkedIn](https://www.linkedin.com/legal/user-agreement) encadrent l’usage de logiciels qui copient les données du service ou automatisent des actions. Ce MVP limite la lecture à la page que vous ouvrez et aux profils que vous choisissez, sans exploration automatique, API privée, contournement de CAPTCHA ou envoi automatique. Vérifiez que votre utilisation respecte les conditions applicables à votre compte. Si LinkedIn affiche un contrôle ou une erreur, l’application s’arrête et vous laisse reprendre la main.
-
-## Vérifications
-
-```powershell
-pnpm test
-pnpm build
-```
-
-Les tests utilisent des profils inventés. Ils vérifient la normalisation des URL, la réimportation sans doublon, l’alerte de doublon possible, le blocage d’une deuxième invitation après redémarrage, la chronologie, l’arrêt de la file sur un résultat incertain et les champs CSV. Le build vérifie TypeScript et génère l’interface de production. Aucun test ne se connecte à LinkedIn.
-
-À vérifier manuellement sur votre ordinateur avec votre propre session : ouverture de Chromium, connexion faite par vous, URL de recherche adaptée à votre interface LinkedIn, lecture des cartes visibles et confirmation d’un envoi réel. Les sélecteurs LinkedIn peuvent changer ; l’ajout manuel reste disponible.
-
+Sources : [Greenhouse](https://docs.greenhouse.io/job-board.html), [Lever](https://github.com/lever/postings-api), [Playwright](https://playwright.dev/docs/input). Découverte via flux publics ; candidature via formulaire navigateur, sans clé API d'employeur.

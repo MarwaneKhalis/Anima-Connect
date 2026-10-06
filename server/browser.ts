@@ -226,4 +226,3 @@ export class LocalBrowser {
     this.page = undefined;
   }
 }
-
