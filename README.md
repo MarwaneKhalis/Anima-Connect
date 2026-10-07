@@ -14,6 +14,21 @@ pnpm build
 pnpm start
 ```
 
+## Application bureau Windows
+
+Anima Connect peut aussi être installée comme application Windows x64. Elle ouvre l’interface depuis les fichiers installés et appelle son moteur local par IPC : **aucun serveur web ni port localhost n’est lancé**. SQLite et le profil de navigation Playwright sont conservés dans le dossier utilisateur Windows ; Chromium est inclus dans l’installation.
+
+Pour télécharger l’installateur depuis GitHub, ouvre l’exécution réussie du workflow **Verify Anima Connect** dans l’onglet *Actions*, puis télécharge l’artefact **anima-connect-windows**. Décompresse-le et lance `Anima Connect Setup 0.2.0.exe`.
+
+Pour créer l’installateur localement sous Windows avec Node.js 24 et pnpm :
+
+```powershell
+pnpm install --frozen-lockfile
+pnpm desktop:dist
+```
+
+L’installateur est créé dans `release/`. Pour lancer l’application bureau en développement : `pnpm desktop:dev`. Pour vérifier le paquet Windows : `pnpm desktop:smoke`.
+
 Ouvrir [Anima Connect](http://127.0.0.1:4174). Pour développer : `pnpm dev`, puis [localhost:5173](http://127.0.0.1:5173). Le serveur écoute uniquement sur `127.0.0.1`. La démo utilise des données fictives séparées et désactive les connexions et envois externes.
 
 ## Parcours complet
@@ -45,7 +60,7 @@ Les formulaires HTML avec champs libellés et boutons reconnus sont pris en char
 
 ## Données
 
-- Base personnelle : `data/anima-connect.sqlite` ; démo : `data/demo.sqlite`.
+- En mode web local : `data/anima-connect.sqlite` ; démo : `data/demo.sqlite`. L’application bureau garde ses bases et son profil de navigation dans le dossier de données utilisateur Windows.
 - Mots de passe carrière : **AES-256-GCM**, clé dérivée par **scrypt**, liée à l'identité et l'origine du compte. Secrets déchiffrés uniquement côté serveur. Profil, CV, identifiants et suivi stockés localement en clair.
 - Verrouiller le coffre arrête le moteur. Sans phrase secrète, les mots de passe enregistrés ne sont pas récupérables.
 - Sauvegarde/restauration SQLite : **Prospection → Sauvegardes**. Le moteur est arrêté et le coffre verrouillé avant restauration ; copie de sécurité conservée. Toutes les tables carrière sont incluses.

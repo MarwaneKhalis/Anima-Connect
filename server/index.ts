@@ -148,7 +148,7 @@ function staticFile(pathname: string, res: ServerResponse) {
   res.end(readFileSync(target));
 }
 
-const server = createServer(async (req, res) => {
+export async function handleRequest(req: IncomingMessage, res: ServerResponse) {
   const hosts = [`127.0.0.1:${port}`, `localhost:${port}`];
   if (
     !hosts.includes(req.headers.host || "") ||
@@ -528,20 +528,26 @@ const server = createServer(async (req, res) => {
   } catch (error) {
     fail(res, error);
   }
-});
+}
+const electronMode = process.env.ANIMA_ELECTRON_MODE === "1";
+const server = electronMode ? undefined : createServer(handleRequest);
 
-server.listen(port, "127.0.0.1", () =>
-  console.log(`Anima Connect : http://127.0.0.1:${port}`),
-);
+if (server)
+  server.listen(port, "127.0.0.1", () =>
+    console.log(`Anima Connect : http://127.0.0.1:${port}`),
+  );
 async function shutdown() {
   await runner.stop();
   await demoRunner.stop();
   vault.lock();
   demoVault.lock();
   await browser.close();
-  server.close();
+  server?.close();
   realStore.close();
   demoStore.close();
 }
-process.on("SIGINT", shutdown);
-process.on("SIGTERM", shutdown);
+if (!electronMode) {
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+}
+export { shutdown };
