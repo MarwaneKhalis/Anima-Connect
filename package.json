@@ -15,7 +15,7 @@
     "desktop:compile": "tsc -p tsconfig.desktop.json",
     "desktop:dev": "pnpm build && pnpm desktop:compile && electron .",
     "desktop:browser": "node scripts/install-desktop-browser.cjs",
-    "desktop:dist": "pnpm build && pnpm desktop:compile && pnpm desktop:browser && electron-builder --win nsis",
+    "desktop:dist": "pnpm build && pnpm desktop:compile && pnpm desktop:browser && electron-builder --win nsis --publish never",
     "desktop:smoke": "node scripts/desktop-smoke.mjs"
   },
   "dependencies": {
