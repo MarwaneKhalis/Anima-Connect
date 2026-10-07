@@ -4,6 +4,7 @@ import { chromium, type Browser, type BrowserContext, type Page } from "playwrig
 import type {
   Application, CareerProfile, JobOffer, MissingField, Receipt, Resume, RunMode, RunResult,
 } from "../src/shared/career.ts";
+import { allowsCareerAtsNavigation, allowsCareerAtsResource, careerAtsForUrl, findApplyLink } from "./career-ats.ts";
 
 export interface CareerBrowserOptions { headless?: boolean; allowedTestOrigins?: string[] }
 type Control = { index: number; tag: string; type: string; label: string; name: string; key: string; required: boolean; value: string; checked: boolean; uploaded: boolean; options: string[] };
@@ -16,6 +17,7 @@ type BrowserRunInput = {
 };
 type BrowserSession = {
   input: BrowserRunInput; page: Page; flowOrigin: string; initialNavigation: boolean;
+  pendingAtsOrigin?: string;
   seen: Set<string>; loggedIn: boolean; resumeCount: number; initialValues: Map<string, string>;
   submittedClick: boolean;
   pausedPageBody?: string;
@@ -52,7 +54,7 @@ const knownValue = (key: string, p: CareerProfile): string | undefined => {
     [/^(full name|your name|nom complet)$/, [p.firstName, p.lastName].filter(Boolean).join(" ")],
     [/^(e mail|email|email address|adresse e mail|courriel)$/, p.email],
     [/^(phone|phone number|telephone|numero de telephone|mobile)$/, p.phone],
-    [/^(city|ville|current city)$/, p.city],
+    [/^(city|ville|current city|location city|current location)$/, p.city],
     [/^(country|pays)$/, p.country],
     [/^(address|street address|adresse)$/, p.address],
     [/^(postal code|zip code|code postal)$/, p.postalCode],
@@ -188,8 +190,18 @@ export class CareerBrowser {
         let url: URL;
         try { url = new URL(request.url()); } catch { return route.abort(); }
         if (url.origin !== session!.flowOrigin) {
-          if (session!.initialNavigation && request.isNavigationRequest() && request.redirectedFrom()) {
-            try { await assertPublic(url, this.testOrigins); session!.flowOrigin = url.origin; } catch { return route.abort(); }
+          const allowedAtsNavigation = request.isNavigationRequest() && allowsCareerAtsNavigation({
+            from: session!.flowOrigin, to: url.href, pendingAtsOrigin: session!.pendingAtsOrigin,
+            initialNavigation: session!.initialNavigation, redirected: Boolean(request.redirectedFrom()), testOrigins: this.testOrigins,
+          });
+          if (allowedAtsNavigation) {
+            try {
+              await assertPublic(url, this.testOrigins);
+              session!.flowOrigin = url.origin;
+              session!.pendingAtsOrigin = url.origin;
+            } catch { return route.abort(); }
+          } else if (allowsCareerAtsResource({ from: session!.flowOrigin, to: url.href, method: request.method(), kind: request.resourceType() as Parameters<typeof allowsCareerAtsResource>[0]["kind"] })) {
+            return route.continue();
           } else return route.abort();
         }
         return route.continue();
@@ -245,6 +257,24 @@ export class CareerBrowser {
         return result("blocked", "Vérification CAPTCHA ou MFA : effectuez-la dans le navigateur, puis reprenez la candidature.");
       }
       const cs = await controls(page);
+      const onSupportedAts = careerAtsForUrl(session.flowOrigin) !== null;
+      const onExplicitTestOrigin = this.testOrigins.has(session.flowOrigin);
+      if (!onSupportedAts && !onExplicitTestOrigin) {
+        // Never populate personal data on an arbitrary career-site form. We may only follow an
+        // explicit, visible Apply link to one of the named public ATS hosts above.
+        if (cs.length === 0) {
+          const apply = await findApplyLink(page, this.testOrigins);
+          if (apply === "ambiguous") return result("blocked", "Plusieurs liens de candidature sont possibles : sélectionnez le parcours manuellement.");
+          if (apply) {
+            if (session.seen.has(apply.href)) return result("blocked", "Le lien de candidature forme une boucle.");
+            session.seen.add(apply.href);
+            if (apply.vendor !== "test") session.pendingAtsOrigin = new URL(apply.href).origin;
+            await advance(page, page.locator("a[href]").nth(apply.index));
+            continue;
+          }
+        }
+        return result("blocked", "Ce site carrière n’est pas pris en charge. Les données personnelles ne seront pas transmises à cette origine.");
+      }
       const pageSignature = page.url() + "|" + cs.map(c => c.name + ":" + c.key).join("|");
       for (const c of cs) {
         const initialKey = pageSignature + "|" + c.index + "|" + c.type + "|" + (c.name || c.key);
@@ -256,6 +286,7 @@ export class CareerBrowser {
       };
       if (cs.some(c => c.type === "password")) {
         if (session.loggedIn) return result("blocked", "Connexion non terminée ; intervention manuelle requise.");
+        if (!onSupportedAts && !onExplicitTestOrigin) return result("blocked", "Le coffre n’est accessible que pour un ATS explicitement pris en charge.");
         const credential = input.getCredential(session.flowOrigin);
         if (!credential) return result("blocked", "Compte requis pour cette origine ; enregistrez ses identifiants dans le coffre.");
         const user = cs.find(loginField);
@@ -348,6 +379,22 @@ export class CareerBrowser {
         else if (!c.required && c.value && !changedByUser(c)) await loc.fill("");
       }
       if (missing.length) return result("needs_input", "Renseignez les champs requis dans l’application ou dans le navigateur, puis reprenez la candidature.", missing);
+      // Public ATS job details usually expose an Apply link before they render the application
+      // form. Follow exactly one visible link; never guess a button action or leave the vendor.
+      if ((onSupportedAts || onExplicitTestOrigin) && cs.length === 0) {
+        const apply = await findApplyLink(page, this.testOrigins);
+        if (apply === "ambiguous") return result("blocked", "Plusieurs liens de candidature sont possibles : sélectionnez le parcours manuellement.");
+        if (apply) {
+          const targetAts = careerAtsForUrl(apply.href);
+          const currentAts = careerAtsForUrl(session.flowOrigin);
+          if (apply.vendor !== "test" && targetAts !== currentAts) return result("blocked", "Le lien de candidature sort du fournisseur ATS pris en charge.");
+          if (session.seen.has(apply.href)) return result("blocked", "Le lien de candidature forme une boucle.");
+          session.seen.add(apply.href);
+          if (apply.vendor !== "test") session.pendingAtsOrigin = new URL(apply.href).origin;
+          await advance(page, page.locator("a[href]").nth(apply.index));
+          continue;
+        }
+      }
       const actions = (await buttons(page)).filter(b => !b.disabled);
       const finals = actions.filter(b => finalButton(b.text));
       const nexts = actions.filter(b => nextButton(b.text));

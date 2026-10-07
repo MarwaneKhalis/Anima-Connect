@@ -38,6 +38,52 @@ test("preparation fills standard form but sends no application", async () => {
   const { outcome, marker } = await run("/simple", "prepare");
   assert.equal(outcome.state, "ready"); assert.equal(marker, 0); assert.equal(fx.submissions.length, count);
 });
+test("follows one visible Apply link and waits for its first-party form script", async () => {
+  const count = fx.submissions.length;
+  const scripts = fx.applyScriptVisits;
+  const prepared = await run("/apply-link", "prepare");
+  assert.equal(prepared.outcome.state, "ready");
+  assert.equal(prepared.marker, 0);
+  assert.equal(fx.applyScriptVisits, scripts + 1);
+  assert.equal(fx.submissions.length, count);
+
+  const submitted = await run("/apply-link", "submit");
+  assert.equal(submitted.outcome.state, "submitted");
+  assert.equal(fx.submissions.length, count + 1);
+  assert.equal(fx.submissions.at(-1)?.fields.email, profile.email);
+  assert.equal(fx.submissions.at(-1)?.resume?.sha256, meta("cv-a", bytesA).sha256);
+});
+test("ambiguous Apply links stop before any profile data or CV is sent", async () => {
+  const count = fx.submissions.length;
+  const { outcome, marker } = await run("/ambiguous-apply", "submit");
+  assert.equal(outcome.state, "blocked");
+  assert.match(outcome.message, /Plusieurs liens/);
+  assert.equal(marker, 0);
+  assert.equal(fx.submissions.length, count);
+});
+test("Lever-style full-name form and Greenhouse-style custom questions use safe field matching", async () => {
+  const beforeLever = fx.submissions.length;
+  const lever = await run("/lever-job", "submit");
+  assert.equal(lever.outcome.state, "submitted");
+  assert.equal(fx.submissions.length, beforeLever + 1);
+  assert.equal(fx.submissions.at(-1)?.fields.fullName, "Ada Lovelace");
+  assert.equal(fx.submissions.at(-1)?.fields.email, profile.email);
+  assert.equal(fx.submissions.at(-1)?.fields.location, profile.city);
+  assert.equal(fx.submissions.at(-1)?.fields["urls[LinkedIn]"], "");
+  assert.equal(fx.submissions.at(-1)?.resume?.sha256, meta("cv-a", bytesA).sha256);
+
+  const beforeGreenhouse = fx.submissions.length;
+  const paused = await run("/greenhouse-application", "submit");
+  assert.equal(paused.outcome.state, "needs_input");
+  assert.match(paused.outcome.missingFields[0]?.label || "", /eligible to work/i);
+  assert.equal(paused.marker, 0);
+  assert.equal(fx.submissions.length, beforeGreenhouse);
+  const answered = await run("/greenhouse-application", "submit", { answers: { custom_work_authorized: "No" } });
+  assert.equal(answered.outcome.state, "submitted");
+  assert.equal(fx.submissions.at(-1)?.fields.first_name, profile.firstName);
+  assert.equal(fx.submissions.at(-1)?.fields.last_name, profile.lastName);
+  assert.equal(fx.submissions.at(-1)?.fields.custom_work_authorized, "No");
+});
 test("submission sends exactly one POST and selected resume bytes", async () => {
   const count = fx.submissions.length;
   const { outcome, marker } = await run("/simple", "submit");
