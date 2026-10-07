@@ -25,6 +25,7 @@ import { CareerRunner } from "./career-runner.ts";
 import { CareerAI } from "./career-ai.ts";
 import { handleCareerApi } from "./career-api.ts";
 import { JobDiscovery } from "./job-discovery.ts";
+import { FranceTravailDiscovery } from "./france-travail-discovery.ts";
 import { csvParse, csvStringify, makeSearchUrl } from "./domain.ts";
 import type { Prospect, SavedSearch, Template } from "../src/shared/types.ts";
 
@@ -191,6 +192,7 @@ export async function handleRequest(req: IncomingMessage, res: ServerResponse) {
         ai: electronMode && !demo ? new CareerAI(careerStore, vault) : undefined,
         runner: demo ? demoRunner : runner,
         discovery,
+        offerSearch: new FranceTravailDiscovery(demo ? demoVault : vault),
         demo,
         allowedTestOrigins,
       })
