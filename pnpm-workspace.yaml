@@ -1,0 +1,6 @@
+allowBuilds:
+  electron: true
+  electron-winstaller: true
+  esbuild: true
+overrides:
+  source-map-js: 1.2.2
