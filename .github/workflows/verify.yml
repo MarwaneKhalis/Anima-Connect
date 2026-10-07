@@ -5,7 +5,9 @@ on:
 jobs:
   verify:
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 45
+    env:
+      PLAYWRIGHT_BROWSERS_PATH: .playwright-browsers
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -18,9 +20,29 @@ jobs:
       - run: pnpm exec playwright install chromium
       - run: pnpm build
       - run: pnpm test
+      - run: pnpm desktop:dist
+      - run: pnpm desktop:smoke
+      - name: Install and smoke-test NSIS app on a fresh Windows runner
+        shell: pwsh
+        run: |
+          $installer = (Resolve-Path "release/Anima Connect Setup 0.2.0.exe").Path
+          $installDir = Join-Path $env:RUNNER_TEMP "anima-connect-install"
+          $arguments = "/S /D=$installDir"
+          $process = Start-Process -FilePath $installer -ArgumentList $arguments -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "NSIS installer failed with exit code $($process.ExitCode)." }
+          $installedExe = Join-Path $installDir "Anima Connect.exe"
+          if (!(Test-Path -LiteralPath $installedExe)) { throw "Installed executable was not found: $installedExe" }
+          $env:ANIMA_DESKTOP_EXECUTABLE = $installedExe
+          pnpm desktop:smoke
+          if ($LASTEXITCODE -ne 0) { throw "Installed app smoke test failed with exit code $LASTEXITCODE." }
+          $remaining = Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($installDir, [StringComparison]::OrdinalIgnoreCase) }
+          if ($remaining) { throw "An Anima Connect process remained after the smoke test: $($remaining.Name -join ', ')" }
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: browser-evidence
-          path: artifacts/
+          name: anima-connect-windows
+          path: |
+            artifacts/
+            release/*.exe
+          retention-days: 30
           if-no-files-found: ignore

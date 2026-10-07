@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { apiFetch, downloadResponse } from "./api.ts";
 import {
   EMPTY_FILTERS,
   STATUSES,
@@ -184,7 +185,7 @@ export default function App({ initialTab = "accueil", demoMode, embedded = false
     mode = demo,
   ): Promise<T> {
     const separator = path.includes("?") ? "&" : "?";
-    const response = await fetch(
+    const response = await apiFetch(
       `/api${path}${separator}demo=${mode ? "1" : "0"}`,
       init,
     );
@@ -436,21 +437,13 @@ export default function App({ initialTab = "accueil", demoMode, embedded = false
       setDetail(null);
     }, "Action ajoutée à la file. Aucune invitation ou message n’a été envoyé.");
   }
-  function downloadBlob(blob: Blob, filename: string) {
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = filename;
-    a.click();
-    URL.revokeObjectURL(url);
-  }
   async function download(path: string, filename: string) {
     await run(async () => {
-      const response = await fetch(
+      const response = await apiFetch(
         `/api${path}${path.includes("?") ? "&" : "?"}demo=${demo ? "1" : "0"}`,
       );
       if (!response.ok) throw new Error((await response.json()).error);
-      downloadBlob(await response.blob(), filename);
+      await downloadResponse(response, filename);
     }, "Fichier téléchargé.");
   }
 
@@ -1805,12 +1798,12 @@ export default function App({ initialTab = "accueil", demoMode, embedded = false
                       if (!file) return;
                       if (
                         !window.confirm(
-                          "Restaurer cette sauvegarde ? La base actuelle sera copiée dans data/ avant remplacement.",
+                          `Restaurer cette sauvegarde ? Une copie de la base actuelle sera gardée ${window.anima ? "dans le dossier de données local" : "dans data/"} avant remplacement.`,
                         )
                       )
                         return;
                       await run(async () => {
-                        const response = await fetch(`/api/restore?demo=0`, {
+                        const response = await apiFetch(`/api/restore?demo=0`, {
                           method: "POST",
                           headers: {
                             "Content-Type": "application/octet-stream",
@@ -1827,12 +1820,18 @@ export default function App({ initialTab = "accueil", demoMode, embedded = false
                 <section className="panel settings-card span-2">
                   <h2>Navigateur local</h2>
                   <p>
-                    Au premier usage, installez Chromium avec{" "}
-                    <code>npx playwright install chromium</code>. Ouvrez une
-                    recherche depuis « Recherches ». Connectez-vous vous-même à
-                    LinkedIn dans cette fenêtre ; Anima Connect ne demande ni ne
-                    conserve votre mot de passe. Le profil navigateur reste dans{" "}
-                    <code>data/browser-profile/</code>, hors Git.
+                    {window.anima ? (
+                      "Chromium est inclus avec l’application. "
+                    ) : (
+                      <>
+                        Au premier usage, installez Chromium avec{" "}
+                        <code>npx playwright install chromium</code>.{" "}
+                      </>
+                    )}
+                    Ouvrez une recherche depuis « Recherches ». Connectez-vous
+                    vous-même à LinkedIn dans cette fenêtre ; Anima Connect ne
+                    demande ni ne conserve votre mot de passe. Le profil de
+                    navigation reste sur cet ordinateur.
                   </p>
                 </section>
               </div>
@@ -1881,10 +1880,16 @@ export default function App({ initialTab = "accueil", demoMode, embedded = false
                 <section className="panel">
                   <h2>Où sont mes données ?</h2>
                   <p>
-                    La base et le profil navigateur sont dans le dossier local{" "}
-                    <code>data/</code>, exclu de Git. Utilisez « Sauvegarder la
-                    base » dans les paramètres pour obtenir une copie
-                    transportable.
+                    {window.anima ? (
+                      "La base et le profil de navigation sont conservés dans le dossier Anima Connect de votre profil Windows. "
+                    ) : (
+                      <>
+                        La base et le profil de navigation sont dans le dossier local{" "}
+                        <code>data/</code>, exclu de Git. {" "}
+                      </>
+                    )}
+                    Utilisez « Sauvegarder la base » dans les paramètres pour
+                    obtenir une copie transportable.
                   </p>
                 </section>
               </div>

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { apiFetch, downloadResponse } from "./api.ts";
 import Legacy, { type Tab as LegacyTab } from "./App.tsx";
 import type {
   Application,
@@ -99,7 +100,7 @@ export default function CareerWorkspace() {
     method = "GET",
     body?: unknown,
   ): Promise<T> {
-    const response = await fetch(`/api/career${path}?demo=${demo ? 1 : 0}`, {
+    const response = await apiFetch(`/api/career${path}?demo=${demo ? 1 : 0}`, {
       method,
       headers: { "Content-Type": "application/json", "X-Anima-Request": "1" },
       body: body === undefined ? undefined : JSON.stringify(body),
@@ -126,7 +127,7 @@ export default function CareerWorkspace() {
     setError("");
     cancelBatch.current = true;
     load(true).catch((e) => setError(e.message));
-    fetch(`/api/bootstrap?demo=${demo ? 1 : 0}`)
+    apiFetch(`/api/bootstrap?demo=${demo ? 1 : 0}`)
       .then((r) => r.json())
       .then((v) => setProspects(v.prospects || []))
       .catch(() => {});
@@ -385,7 +386,7 @@ export default function CareerWorkspace() {
           {!data ? (
             <div className="cw-empty">
               {error
-                ? "Le serveur ne répond pas. Vérifiez son lancement."
+                ? "Anima Connect ne répond pas. Vérifiez que l’application est démarrée."
                 : "Ouverture de votre espace…"}
             </div>
           ) : (
@@ -982,8 +983,20 @@ export default function CareerWorkspace() {
                             </small>
                           </div>
                           <a
-                            href={`/api/career/resumes/${r.id}/download?demo=${demo ? 1 : 0}`}
+                            href="#download"
                             aria-label={`Télécharger ${r.name}`}
+                            onClick={async (event) => {
+                              event.preventDefault();
+                              try {
+                                const response = await apiFetch(
+                                  `/api/career/resumes/${r.id}/download?demo=${demo ? 1 : 0}`,
+                                );
+                                if (!response.ok) throw new Error("Téléchargement impossible.");
+                                await downloadResponse(response, r.filename);
+                              } catch (e) {
+                                setError(e instanceof Error ? e.message : String(e));
+                              }
+                            }}
                           >
                             ↓
                           </a>
