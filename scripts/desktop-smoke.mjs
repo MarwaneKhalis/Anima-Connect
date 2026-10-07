@@ -3,7 +3,9 @@ import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import { _electron as electron } from "playwright";
 
-const executablePath = resolve("release/win-unpacked/Anima Connect.exe");
+const executablePath = resolve(
+  process.env.ANIMA_DESKTOP_EXECUTABLE || "release/win-unpacked/Anima Connect.exe",
+);
 const application = await electron.launch({ executablePath });
 try {
   const window = await application.firstWindow();

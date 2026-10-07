@@ -24,11 +24,11 @@
     "react-dom": "^19.1.1"
   },
   "devDependencies": {
-    "electron": "^39.2.7",
-    "electron-builder": "^26.0.12",
     "@types/node": "^24.5.0",
     "@types/react": "^19.1.13",
     "@types/react-dom": "^19.1.9",
+    "electron": "^44.5.1",
+    "electron-builder": "^26.0.12",
     "prettier": "^3.9.9",
     "typescript": "^5.9.2",
     "vite": "^7.1.7"
@@ -37,12 +37,41 @@
   "build": {
     "appId": "com.animaconnect.desktop",
     "productName": "Anima Connect",
-    "directories": { "output": "release" },
-    "files": ["electron/**/*", "dist/**/*", ".desktop-build/**/*", "node_modules/**/*", "package.json"],
-    "extraResources": [{ "from": ".playwright-browsers", "to": "playwright-browsers" }],
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "electron/**/*",
+      "dist/**/*",
+      ".desktop-build/**/*",
+      "node_modules/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": ".playwright-browsers",
+        "to": "playwright-browsers"
+      }
+    ],
     "asar": true,
-    "asarUnpack": ["node_modules/playwright-core/.local-browsers/**/*"],
-    "win": { "target": [{ "target": "nsis", "arch": ["x64"] }] },
-    "nsis": { "oneClick": false, "allowToChangeInstallationDirectory": true, "createDesktopShortcut": true, "createStartMenuShortcut": true }
+    "asarUnpack": [
+      "node_modules/playwright-core/.local-browsers/**/*"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
   }
 }
