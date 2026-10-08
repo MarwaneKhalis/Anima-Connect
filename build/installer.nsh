@@ -43,7 +43,7 @@
   IfErrors user_name_unavailable
   Pop $1
   StrCmp $1 "" user_name_unavailable
-  nsExec::ExecToLog '"$SYSDIR\icacls.exe" "$INSTDIR" /grant "*S-1-15-2-1:(OI)(CI)(RX)" "$1:(OI)(CI)(M)" /T /Q'
+  nsExec::ExecToLog '"$SYSDIR\icacls.exe" "$INSTDIR" /grant "*S-1-15-2-1:(OI)(CI)(RX)" "$1:(OI)(CI)(RX)" /T /Q'
   Pop $0
   StrCmp $0 "0" installed_acl_granted
     DetailPrint "Impossible d’autoriser la lecture sandboxée des fichiers installés (code $0)."

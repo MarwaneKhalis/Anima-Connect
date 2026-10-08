@@ -10,6 +10,9 @@ import { _electron as electron } from "playwright";
 const executablePath = resolve(
   process.env.ANIMA_DESKTOP_EXECUTABLE || "release/win-unpacked/Anima Connect.exe",
 );
+if (process.env.CI === "true" && process.env.ANIMA_SMOKE_NO_SANDBOX === "1") {
+  throw new Error("Le smoke test CI doit conserver le sandbox Chromium activé.");
+}
 const fixtureSubmissions = [];
 const fixture = createServer(async (req, res) => {
   if (req.method === "GET" && ["/apply", "/apply-campaign"].includes(req.url)) {
