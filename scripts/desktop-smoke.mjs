@@ -149,9 +149,11 @@ try {
     CAREER_TEST_ARBEITNOW_URL: `${fixtureOrigin}/apply-campaign`,
     CAREER_HEADLESS: "1",
   };
+  const launchArgs = [`--user-data-dir=${userDataDir}`];
+  if (process.env.ANIMA_SMOKE_NO_SANDBOX === "1") launchArgs.push("--no-sandbox");
   const launchOptions = {
     executablePath,
-    args: [`--user-data-dir=${userDataDir}`],
+    args: launchArgs,
     env,
   };
 
