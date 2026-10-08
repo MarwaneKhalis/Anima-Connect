@@ -322,7 +322,7 @@ test("Arbeitnow France can discover and campaign for an offer without France Tra
   assert.deepEqual(pageErrors, []);
 });
 
-test("automatic campaign keeps the discovery ranking when applying its submission cap", async (t) => {
+test("automatic campaign submits the highest-ranked offer first when capped", async (t) => {
   const app = await startCareerTestServer();
   t.after(() => app.close());
   const profileResponse = await app.json("/api/career/profile", profile(), "PUT");
@@ -344,25 +344,26 @@ test("automatic campaign keeps the discovery ranking when applying its submissio
   const browser = await chromium.launch({ headless: true });
   t.after(() => browser.close());
   const page = await browser.newPage({ viewport: { width: 1365, height: 900 } });
-  const submittedPayloads: { jobIds: string[] }[] = [];
   await page.route((url) => new URL(url).pathname === "/api/career/sources/arbeitnow/search", (route) => {
     return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ jobs: [preferred.value, secondary.value], note: "Résultats classés pour le test." }) });
   });
-  await page.route((url) => new URL(url).pathname === "/api/career/campaigns", async (route) => {
-    if (route.request().method() === "POST") submittedPayloads.push(route.request().postDataJSON() as { jobIds: string[] });
-    await route.continue();
-  });
-  await page.route((url) => /^\/api\/career\/campaigns\/[^/]+\/start$/.test(new URL(url).pathname), (route) => route.fulfill({
-    status: 200, contentType: "application/json", body: JSON.stringify({}),
-  }));
   await page.goto(app.baseUrl, { waitUntil: "networkidle" });
   await page.getByRole("button", { name: "Offres", exact: true }).click();
   await page.getByLabel("Métier(s) ou mot(s)-clé(s)").fill("Ingénieure logiciel");
   await page.getByLabel("CV pour les candidatures").selectOption({ label: "CV principal" });
   await page.getByLabel("Plafond d’envoi par campagne").selectOption("1");
   await page.getByRole("button", { name: "Trouver et candidater automatiquement" }).click();
-  await waitFor(async () => submittedPayloads[0] ?? null, (value) => value !== null, 10_000);
-  assert.deepEqual(submittedPayloads[0]?.jobIds, [preferred.value.id, secondary.value.id]);
+  const campaign = await waitFor(async () => (await app.json("/api/career/campaigns")).value.campaigns[0], (value) => value?.state === "limit_reached", 20_000);
+  assert.equal(campaign.counts.total, 2);
+  assert.equal(campaign.counts.submitted, 1);
+  assert.equal(campaign.counts.pending, 1);
+  const detail = await app.json(`/api/career/campaigns/${campaign.id}`);
+  assert.deepEqual(detail.value.items.map((item: { jobId: string }) => item.jobId), [preferred.value.id, secondary.value.id]);
+  assert.equal(detail.value.items[0].state, "submitted");
+  assert.equal(detail.value.items[1].state, "pending");
+  const { value: snapshot } = await app.json("/api/career/bootstrap");
+  assert.equal(snapshot.applications.find((item: Application) => item.state === "submitted")?.jobId, preferred.value.id);
+  assert.equal(app.fixture.submissions.length, 1);
 });
 
 test("Arbeitnow search can save offers before a CV is added", async (t) => {
