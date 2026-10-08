@@ -319,6 +319,31 @@ test("runner rejects parallel runs and never repeats uncertain submission", asyn
   assert.equal(fx.submissions.length, count + 1);
   db.db.close();
 });
+test("runner uses the selected account for an ATS origin when multiple accounts are saved", async () => {
+  const db = new Store(":memory:");
+  const atsOrigin = new URL(fx.atsUrl).origin;
+  const store = new CareerStore(db.db, { allowedTestOrigins: [new URL(fx.baseUrl).origin, atsOrigin] });
+  const vault = new Vault(db.db, { allowedTestOrigins: [new URL(fx.baseUrl).origin, atsOrigin] });
+  store.saveProfile(profile);
+  const resume = store.saveResume({ name: "CV", filename: "cv.pdf", mime: "application/pdf", bytes: bytesA });
+  const offer = store.saveJob({ url: `${atsOrigin}/ats-apply`, title: "Engineer", company: "Fixture", location: "Paris" });
+  const application = store.createApplication({ jobId: offer.id, resumeId: resume.id });
+  vault.initialize("a sufficiently long test passphrase");
+  vault.saveCredential({ origin: atsOrigin, label: "Other", username: "wrong@example.test", password: "wrong-secret" });
+  const selected = vault.saveCredential({ origin: atsOrigin, label: "Selected", username: "ats@example.test", password: "ats-secret" });
+  const selectedAccountBrowser = new CareerBrowser({ headless: true, allowedTestOrigins: [new URL(fx.baseUrl).origin, atsOrigin] });
+  const runner = new CareerRunner(store, vault, selectedAccountBrowser);
+  const loginsBefore = fx.loginCount, submissionsBefore = fx.submissions.length;
+  runner.start(application.id, "submit", selected.id);
+  const deadline = Date.now() + 30_000;
+  while (runner.isBusy() && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(store.getApplication(application.id).state, "submitted");
+  assert.equal(fx.loginCount, loginsBefore + 1);
+  assert.equal(fx.submissions.length, submissionsBefore + 1);
+  assert.equal(fx.submissions.at(-1)?.resume?.sha256, meta("cv-a", bytesA).sha256);
+  await runner.stop();
+  db.db.close();
+});
 test("runner retains a paused attempt and resumes it with newly saved answers", async () => {
   const db = new Store(":memory:");
   const origin = new URL(fx.baseUrl).origin;

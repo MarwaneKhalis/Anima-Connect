@@ -1735,6 +1735,11 @@ export default function App({ initialTab = "accueil", demoMode, embedded = false
                     Enregistrez vos prospects en CSV ou toutes vos données en
                     base SQLite.
                   </p>
+                  <small>
+                    La sauvegarde SQLite inclut les profils, CV, candidatures et
+                    notes sans chiffrement. Gardez-la dans un emplacement de
+                    confiance.
+                  </small>
                   <div className="button-row">
                     <button
                       className="secondary"

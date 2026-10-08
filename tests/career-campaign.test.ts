@@ -13,10 +13,11 @@ const submitted: RunResult = { state: "submitted", missingFields: [], message: "
 class FixturePort {
   apps = new Map<string, Application>();
   calls = new Map<string, number>();
+  credentialIds: (string | null | undefined)[] = [];
   handler: (id: string, signal: AbortSignal) => Promise<RunResult> = async () => submitted;
   createApplication(jobId: string, _resumeId: string) { const id = `app-${jobId}`; const existing = this.apps.get(id); if (existing) return existing; const created = app(id); this.apps.set(id, created); return created; }
   getApplication(id: string) { const value = this.apps.get(id); if (!value) throw new Error("fixture app missing"); return value; }
-  async run(id: string, signal: AbortSignal) { this.calls.set(id, (this.calls.get(id) ?? 0) + 1); const result = await this.handler(id, signal); if (result.state === "submitted") this.apps.set(id, { ...this.getApplication(id), state: "submitted" }); else if (result.state === "uncertain") this.apps.set(id, { ...this.getApplication(id), state: "uncertain" }); else if (result.state === "needs_input" || result.state === "blocked") this.apps.set(id, { ...this.getApplication(id), state: result.state }); return result; }
+  async run(id: string, signal: AbortSignal, credentialId?: string | null) { this.credentialIds.push(credentialId); this.calls.set(id, (this.calls.get(id) ?? 0) + 1); const result = await this.handler(id, signal); if (result.state === "submitted") this.apps.set(id, { ...this.getApplication(id), state: "submitted" }); else if (result.state === "uncertain") this.apps.set(id, { ...this.getApplication(id), state: "uncertain" }); else if (result.state === "needs_input" || result.state === "blocked") this.apps.set(id, { ...this.getApplication(id), state: result.state }); return result; }
 }
 function persistent() {
   const dir = mkdtempSync(join(tmpdir(), "anima-campaign-")), path = join(dir, "campaign.sqlite");
@@ -29,7 +30,7 @@ const create = (store: CareerCampaignStore, port: FixturePort, count = 3, cap = 
   return campaign;
 };
 
-test("crash/restart preserves queue, maps submitting to uncertain, and never resends it", async () => {
+test("crash/restart with an uncertain submission pauses the batch and never sends later offers", async () => {
   const disk = persistent(), port = new FixturePort(); let first = disk.open();
   const campaign = create(first.store, port, 2);
   first.store.requestStart(campaign.id);
@@ -40,11 +41,12 @@ test("crash/restart preserves queue, maps submitting to uncertain, and never res
   first = disk.open();
   const engine = new CareerCampaignEngine(first.store, port);
   await engine.recoverAfterRestart();
-  assert.equal(first.store.get(campaign.id).state, "completed");
+  assert.equal(first.store.get(campaign.id).state, "paused");
   assert.equal(first.store.listItems(campaign.id)[0].state, "uncertain");
-  assert.equal(port.calls.size, 1);
+  assert.equal(port.calls.size, 0);
   assert.equal(port.calls.get(claimed.applicationId), undefined);
-  assert.equal(first.store.listItems(campaign.id).filter(x => x.state === "submitted").length, 1);
+  assert.equal(first.store.listItems(campaign.id)[1].state, "pending");
+  assert.equal(first.store.listItems(campaign.id).filter(x => x.state === "submitted").length, 0);
   first.db.close(); disk.dispose();
 });
 
@@ -74,13 +76,27 @@ test("retry with the same idempotency key completes one partially built batch", 
   assert.throws(() => engine.createFromOffers(offers, "resume-fixture", 5, "stable-batch-key"), /simulated crash/);
   const partial = store.get(store.create("resume-fixture", 5, "stable-batch-key").id);
   assert.equal(partial.state, "building"); assert.equal(store.listItems(partial.id).length, 1);
+  assert.throws(() => engine.createFromOffers([job(1)], "resume-fixture", 5, "stable-batch-key"), /liste d’offres différente/);
+  assert.throws(() => engine.createFromOffers([...offers, job(4)], "resume-fixture", 5, "stable-batch-key"), /liste d’offres différente/);
   const completed = engine.createFromOffers(offers, "resume-fixture", 5, "stable-batch-key");
   assert.equal(completed.id, partial.id); assert.equal(completed.state, "queued");
   assert.equal(store.listItems(completed.id).length, 3); assert.equal(port.apps.size, 3);
   assert.equal(engine.createFromOffers(offers, "resume-fixture", 5, "stable-batch-key").id, completed.id);
-  assert.throws(() => engine.createFromOffers([job(4)], "resume-fixture", 5, "stable-batch-key"), /file différente/);
-  assert.throws(() => store.create("another-resume", 5, "stable-batch-key"), /autre CV ou plafond/);
+  assert.throws(() => engine.createFromOffers([job(4)], "resume-fixture", 5, "stable-batch-key"), /liste d’offres différente/);
+  assert.throws(() => engine.createFromOffers([job(1), job(2)], "resume-fixture", 5, "stable-batch-key"), /liste d’offres différente/);
+  assert.throws(() => store.create("another-resume", 5, "stable-batch-key"), /CV, un compte ou un plafond/);
   db.close(); disk.dispose();
+});
+
+test("campaign preserves discovery rank and binds retries to the same order", () => {
+  const db = new DatabaseSync(":memory:"), store = new CareerCampaignStore(db), port = new FixturePort();
+  const engine = new CareerCampaignEngine(store, port), ranked = [job(3), job(1), job(2)];
+  const campaign = engine.createFromOffers(ranked, "resume-fixture", 1, "ranked-offers");
+  assert.deepEqual(store.listItems(campaign.id).map(item => item.jobId), ["job-3", "job-1", "job-2"]);
+  assert.throws(() => engine.createFromOffers([job(1), job(3), job(2)], "resume-fixture", 1, "ranked-offers"), /liste d’offres différente/);
+  store.requestStart(campaign.id); store.activateRequested(campaign.id);
+  assert.equal(store.claimNext(campaign.id, 1)?.jobId, "job-3");
+  db.close();
 });
 
 test("an acknowledged start persisted while queued is recovered and resumed after restart", async () => {
@@ -110,6 +126,87 @@ test("a manually paused campaign reconciles interrupted items but stays paused",
   assert.deepEqual(first.store.listItems(campaign.id).map(item => item.state), ["uncertain", "pending"]);
   assert.equal(port.calls.size, 0);
   first.db.close(); disk.dispose();
+});
+
+test("a manual pause clears automatic resume intent and stays paused after skip", async () => {
+  const disk = persistent(), { db, store } = disk.open(), port = new FixturePort();
+  const campaign = create(store, port, 2), engine = new CareerCampaignEngine(store, port);
+  store.requestStart(campaign.id); store.activateRequested(campaign.id);
+  engine.pause(campaign.id); // User pause, not a browser-blocked pause.
+  assert.equal(store.get(campaign.id).startRequested, false);
+  const item = store.listItems(campaign.id)[0];
+  engine.skipItem(campaign.id, item.id, "Skip fixture");
+  assert.equal(store.get(campaign.id).state, "paused");
+  assert.equal(store.get(campaign.id).startRequested, false);
+  assert.equal(port.calls.size, 0);
+  await engine.start(campaign.id);
+  assert.equal(store.get(campaign.id).state, "completed");
+  assert.equal(port.calls.size, 1);
+  db.close(); disk.dispose();
+});
+
+test("skipping the final eligible item settles a blocked campaign instead of leaving Resume stale", () => {
+  const db = new DatabaseSync(":memory:"), store = new CareerCampaignStore(db), port = new FixturePort();
+  const campaign = create(store, port, 1), engine = new CareerCampaignEngine(store, port);
+  const item = store.listItems(campaign.id)[0];
+  store.finish(item.id, "needs_input", "blocked fixture");
+  store.requestStart(campaign.id); store.activateRequested(campaign.id); engine.pause(campaign.id, true);
+  engine.skipItem(campaign.id, item.id, "Skip final offer");
+  assert.equal(store.get(campaign.id).state, "completed");
+  db.close();
+});
+
+test("uncertain result halts the batch until a human resolves it; not_submitted is never replayed", async () => {
+  const db = new DatabaseSync(":memory:"), store = new CareerCampaignStore(db), port = new FixturePort();
+  port.handler = async id => id === "app-job-1"
+    ? { state: "uncertain", missingFields: [], message: "No receipt", receipt: null }
+    : submitted;
+  const campaign = create(store, port, 2, 5), engine = new CareerCampaignEngine(store, port);
+  await engine.start(campaign.id);
+  assert.equal(store.get(campaign.id).state, "paused");
+  assert.deepEqual(store.listItems(campaign.id).map(item => item.state), ["uncertain", "pending"]);
+  assert.equal(port.calls.size, 1);
+  await assert.rejects(() => engine.start(campaign.id), /incertain/);
+
+  port.apps.set("app-job-1", { ...port.getApplication("app-job-1"), state: "draft" }); // human resolved not_submitted
+  engine.reconcile(campaign.id);
+  assert.deepEqual(store.listItems(campaign.id).map(item => item.state), ["failed", "pending"]);
+  assert.match(store.listItems(campaign.id)[0].error, /ne sera pas relancé automatiquement/);
+  assert.equal(store.get(campaign.id).state, "paused");
+  await engine.start(campaign.id);
+  assert.equal(port.calls.get("app-job-1"), 1);
+  assert.equal(port.calls.get("app-job-2"), 1);
+  db.close();
+});
+
+test("exception after the durable submitting marker becomes uncertain and halts later offers", async () => {
+  const db = new DatabaseSync(":memory:"), store = new CareerCampaignStore(db), port = new FixturePort();
+  port.handler = async id => {
+    port.apps.set(id, { ...port.getApplication(id), state: "uncertain" });
+    throw new Error("connection lost after submit marker");
+  };
+  const campaign = create(store, port, 2, 5), engine = new CareerCampaignEngine(store, port);
+  await engine.start(campaign.id);
+  assert.equal(store.get(campaign.id).state, "paused");
+  assert.deepEqual(store.listItems(campaign.id).map(item => item.state), ["uncertain", "pending"]);
+  assert.equal(port.calls.size, 1);
+  db.close();
+});
+
+test("manual submitted resolution reconciles an uncertain campaign item and counts it toward the cap", () => {
+  const db = new DatabaseSync(":memory:"), store = new CareerCampaignStore(db), port = new FixturePort();
+  const campaign = create(store, port, 2, 1), engine = new CareerCampaignEngine(store, port);
+  const [uncertainItem, pendingItem] = store.listItems(campaign.id);
+  port.apps.set(uncertainItem.applicationId, { ...port.getApplication(uncertainItem.applicationId), state: "uncertain" });
+  store.finish(uncertainItem.id, "uncertain", "check receipt");
+  store.setState(campaign.id, "paused");
+  port.apps.set(uncertainItem.applicationId, { ...port.getApplication(uncertainItem.applicationId), state: "submitted" }); // human confirmed submitted
+  engine.reconcile(campaign.id);
+  assert.equal(store.listItems(campaign.id)[0].state, "submitted");
+  assert.equal(store.counts(campaign.id).submitted, 1);
+  assert.equal(store.listItems(campaign.id)[1].state, "pending");
+  assert.equal(store.get(campaign.id).state, "limit_reached");
+  db.close();
 });
 
 test("restart request while a paused pump still has a worker is not lost", async () => {
@@ -218,7 +315,31 @@ test("campaign schema migration adds durable idempotency and start-intent column
   const store = new CareerCampaignStore(db);
   assert.equal(store.get("legacy").idempotencyKey, "");
   assert.equal(store.get("legacy").startRequested, false);
+  assert.equal(store.get("legacy").credentialId, null);
   assert.equal(store.create("resume-fixture", 2, "new-uuid-key").state, "building");
+  db.close();
+});
+
+test("expected job set migration preserves legacy queue and only permits an exact retry", () => {
+  const db = new DatabaseSync(":memory:");
+  db.exec(`CREATE TABLE career_campaigns(id TEXT PRIMARY KEY,idempotency_key TEXT NOT NULL,resume_id TEXT NOT NULL,credential_id TEXT NOT NULL DEFAULT '',max_submissions INTEGER NOT NULL,state TEXT NOT NULL,start_requested INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+    CREATE TABLE career_campaign_items(id TEXT PRIMARY KEY,campaign_id TEXT NOT NULL REFERENCES career_campaigns(id) ON DELETE CASCADE,application_id TEXT NOT NULL,job_id TEXT NOT NULL,state TEXT NOT NULL,error TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(campaign_id,job_id),UNIQUE(campaign_id,application_id));
+    INSERT INTO career_campaigns VALUES ('legacy-building','legacy-key','resume-fixture','',4,'building',0,'2026-10-01','2026-10-01');
+    INSERT INTO career_campaign_items VALUES ('legacy-item','legacy-building','app-job-1','job-1','pending','','2026-10-01','2026-10-01');`);
+  const store = new CareerCampaignStore(db), engine = new CareerCampaignEngine(store, new FixturePort());
+  assert.deepEqual(store.expectedJobIds("legacy-building"), ["job-1"]);
+  assert.equal(store.listItems("legacy-building").length, 1);
+  assert.throws(() => engine.createFromOffers([job(1), job(2)], "resume-fixture", 4, "legacy-key"), /liste d’offres différente|file existante ne permet pas/);
+  assert.equal(engine.createFromOffers([job(1)], "resume-fixture", 4, "legacy-key").state, "queued");
+  assert.equal(store.listItems("legacy-building").length, 1);
+  db.close();
+});
+
+test("campaign sends its persisted account choice to each runner invocation", async () => {
+  const db = new DatabaseSync(":memory:"), store = new CareerCampaignStore(db), port = new FixturePort();
+  const campaign = new CareerCampaignEngine(store, port).createFromOffers([job(1)], "resume-fixture", 1, "selected-account", "credential-fixture");
+  await new CareerCampaignEngine(store, port).start(campaign.id);
+  assert.deepEqual(port.credentialIds, ["credential-fixture"]);
   db.close();
 });
 

@@ -35,7 +35,8 @@ async function setup(demo = false, deferred = false) {
   const job: JobOffer = careerStore.saveJob({ url: "https://jobs.example.test/apply/1", title: "Engineer", company: "Fixture", location: "Paris", description: "Test only" });
   const campaigns = new CareerCampaignStore(db), port = new FixturePort(careerStore, deferred);
   const engine = new CareerCampaignEngine(campaigns, port, { concurrency: 1 });
-  const context: CareerCampaignApiContext = { careerStore, campaigns, engine, demo };
+  const closedPausedApplications: string[] = [];
+  const context: CareerCampaignApiContext = { careerStore, campaigns, engine, demo, credentialExists: (id) => ["credential-fixture", "other-fixture"].includes(id), closePausedRunnerFor: async (applicationId) => { closedPausedApplications.push(applicationId); } };
   const server = createServer(async (req, res) => {
     const handled = await handleCareerCampaignApi(req, res, new URL(req.url || "/", "http://127.0.0.1"), context);
     if (!handled) { res.writeHead(404); res.end(); }
@@ -48,7 +49,7 @@ async function setup(demo = false, deferred = false) {
     headers: { ...(method !== "GET" ? { "Content-Type": "application/json", ...(csrf ? { "X-Anima-Request": "1" } : {}) } : {}) },
     ...(method !== "GET" ? { body: JSON.stringify(bodyValue ?? {}) } : {}),
   });
-  return { db, careerStore, campaigns, port, engine, resume, job, close, call };
+  return { db, careerStore, campaigns, port, engine, resume, job, context, closedPausedApplications, close, call };
 }
 
 test("HTTP create/list/detail validate CSRF, idempotency, bounds and counts", async t => {
@@ -70,6 +71,109 @@ test("HTTP create/list/detail validate CSRF, idempotency, bounds and counts", as
   assert.equal((await app.call("/api/career/campaigns/no-such-campaign")).status, 404);
   assert.equal((await app.call("/api/career/campaigns", "POST", { ...payload, maxSubmissions: 0 })).status, 400);
   assert.equal((await app.call("/api/career/campaigns", "POST", { ...payload, jobIds: ["00000000-0000-4000-8000-000000000000"] })).status, 404);
+  assert.equal((await app.call("/api/career/campaigns", "POST", { ...payload, jobIds: Array.from({ length: 451 }, (_, index) => `unknown-${index}`) })).status, 400);
+});
+
+test("campaign persists selected career account and includes it in idempotency", async t => {
+  const app = await setup(); t.after(app.close);
+  const payload = { resumeId: app.resume.id, jobIds: [app.job.id], maxSubmissions: 2, idempotencyKey: "account-key", credentialId: "credential-fixture" };
+  const created = await app.call("/api/career/campaigns", "POST", payload);
+  assert.equal(created.status, 201);
+  const detail = await created.json() as { campaign: { credentialId: string | null } };
+  assert.equal(detail.campaign.credentialId, "credential-fixture");
+  assert.equal((await app.call("/api/career/campaigns", "POST", { ...payload, credentialId: "not-saved" })).status, 404);
+  assert.equal((await app.call("/api/career/campaigns", "POST", { ...payload, credentialId: "other-fixture" })).status, 409);
+  assert.equal((await app.call("/api/career/campaigns", "POST", { ...payload, credentialId: "" })).status, 409);
+});
+
+test("campaign detail reconciles a human-confirmed uncertain submission and updates the cap", async t => {
+  const app = await setup(); t.after(app.close);
+  const job2 = app.careerStore.saveJob({ url: "https://jobs.example.test/apply/2", title: "Engineer 2", company: "Fixture", location: "Paris" });
+  const campaign = app.engine.createFromOffers([app.job, job2], app.resume.id, 1, "manual-resolution");
+  const [item] = app.campaigns.listItems(campaign.id);
+  app.careerStore.claimRun(item.applicationId);
+  app.careerStore.markSubmitting(item.applicationId);
+  app.careerStore.finishRun(item.applicationId, { state: "uncertain", message: "Connection lost", missingFields: [], receipt: null });
+  app.campaigns.finish(item.id, "uncertain", "Check application");
+  app.campaigns.setState(campaign.id, "paused");
+  app.careerStore.resolveUncertain(item.applicationId, { resolution: "submitted", detail: "Confirmation email received" });
+  const response = await app.call(`/api/career/campaigns/${campaign.id}`);
+  const detail = await response.json() as { campaign: { state: string; counts: { submitted: number; pending: number } }; items: { id: string; state: string }[] };
+  assert.equal(detail.items.find(value => value.id === item.id)?.state, "submitted");
+  assert.equal(detail.campaign.counts.submitted, 1);
+  assert.equal(detail.campaign.counts.pending, 1);
+  assert.equal(detail.campaign.state, "limit_reached");
+  assert.equal(app.port.runCount, 0);
+});
+
+test("start reconciles a human-resolved uncertain item before checking whether it can resume", async t => {
+  const app = await setup(); t.after(app.close);
+  const job2 = app.careerStore.saveJob({ url: "https://jobs.example.test/apply/2", title: "Engineer 2", company: "Fixture", location: "Paris" });
+  const campaign = app.engine.createFromOffers([app.job, job2], app.resume.id, 2, "resume-after-resolution");
+  const [item] = app.campaigns.listItems(campaign.id);
+  app.careerStore.claimRun(item.applicationId);
+  app.careerStore.markSubmitting(item.applicationId);
+  app.careerStore.finishRun(item.applicationId, { state: "uncertain", message: "Connection lost", missingFields: [], receipt: null });
+  app.campaigns.finish(item.id, "uncertain", "Check application");
+  app.campaigns.requestStart(campaign.id); app.campaigns.activateRequested(campaign.id); app.engine.pause(campaign.id, true);
+  app.careerStore.resolveUncertain(item.applicationId, { resolution: "not_submitted", detail: "Verified no confirmation" });
+
+  const resumed = await app.call(`/api/career/campaigns/${campaign.id}/start`, "POST");
+  assert.equal(resumed.status, 202);
+  await app.engine.wait(campaign.id);
+  assert.equal(app.campaigns.listItems(campaign.id)[0].state, "failed");
+  assert.equal(app.campaigns.listItems(campaign.id)[1].state, "submitted");
+  assert.equal(app.port.runCount, 1, "Only the pending second offer can be submitted after resolution.");
+});
+
+test("campaign can skip a blocked application and closes its held browser session first", async t => {
+  const app = await setup(); t.after(app.close);
+  const campaign = app.engine.createFromOffers([app.job], app.resume.id, 1, "skip-key");
+  const item = app.campaigns.listItems(campaign.id)[0];
+  app.careerStore.claimRun(item.applicationId);
+  app.careerStore.finishRun(item.applicationId, { state: "blocked", message: "CAPTCHA", missingFields: [], receipt: null });
+  app.campaigns.finish(item.id, "needs_input", "CAPTCHA");
+  app.campaigns.requestStart(campaign.id);
+  app.campaigns.activateRequested(campaign.id);
+  app.campaigns.setState(campaign.id, "paused");
+  const skipped = await app.call(`/api/career/campaigns/${campaign.id}/items/${item.id}/skip`, "POST", { reason: "Site non compatible." });
+  assert.equal(skipped.status, 200);
+  const detail = await skipped.json() as { campaign: { state: string }; items: { state: string; error: string }[] };
+  assert.equal(detail.items[0].state, "skipped");
+  assert.equal(detail.items[0].error, "Site non compatible.");
+  assert.equal(detail.campaign.state, "completed");
+  assert.deepEqual(app.closedPausedApplications, [item.applicationId]);
+  assert.equal((await app.call(`/api/career/campaigns/${campaign.id}/items/${item.id}/skip`, "POST", {})).status, 409);
+});
+
+test("skip does not restart a manually paused campaign or consume pending work while browser is busy", async t => {
+  const app = await setup(); t.after(app.close);
+  const job2 = app.careerStore.saveJob({ url: "https://jobs.example.test/apply/2", title: "Engineer 2", company: "Fixture", location: "Paris" });
+  const campaign = app.engine.createFromOffers([app.job, job2], app.resume.id, 2, "manual-pause-skip");
+  app.campaigns.requestStart(campaign.id); app.campaigns.activateRequested(campaign.id);
+  app.engine.pause(campaign.id); // manual pause clears restart intent
+  const item = app.campaigns.listItems(campaign.id)[0];
+  const skipped = await app.call(`/api/career/campaigns/${campaign.id}/items/${item.id}/skip`, "POST", {});
+  assert.equal(skipped.status, 200);
+  assert.equal(app.campaigns.get(campaign.id).state, "paused");
+  assert.equal(app.campaigns.counts(campaign.id).pending, 1);
+  assert.equal(app.port.runCount, 0);
+
+  const job3 = app.careerStore.saveJob({ url: "https://jobs.example.test/apply/3", title: "Engineer 3", company: "Fixture", location: "Paris" });
+  const campaign2 = app.engine.createFromOffers([app.job, job3], app.resume.id, 2, "blocked-skip-busy");
+  const [blockedItem, pendingItem] = app.campaigns.listItems(campaign2.id);
+  app.careerStore.claimRun(blockedItem.applicationId);
+  app.careerStore.finishRun(blockedItem.applicationId, { state: "blocked", message: "CAPTCHA", missingFields: [], receipt: null });
+  app.campaigns.finish(blockedItem.id, "needs_input", "CAPTCHA");
+  app.campaigns.requestStart(campaign2.id); app.campaigns.activateRequested(campaign2.id); app.engine.pause(campaign2.id, true);
+  app.context.ensureRunnerAvailable = () => { throw new Error("browser busy fixture"); };
+  const deferred = await app.call(`/api/career/campaigns/${campaign2.id}/items/${blockedItem.id}/skip`, "POST", {});
+  assert.equal(deferred.status, 200);
+  const payload = await deferred.json() as { resumeDeferred: boolean; campaign: { state: string }; items: { id: string; state: string }[] };
+  assert.equal(payload.resumeDeferred, true);
+  assert.equal(payload.campaign.state, "paused");
+  assert.equal(payload.items.find(entry => entry.id === pendingItem.id)?.state, "pending");
+  assert.equal(app.port.runCount, 0);
 });
 
 test("start reports context conflicts and is an idempotent no-op for terminal campaigns", async t => {

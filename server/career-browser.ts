@@ -13,7 +13,7 @@ type BrowserRunInput = {
   application: Application; job: JobOffer; profile: CareerProfile;
   resume: { meta: Resume; bytes: Buffer }; mode: RunMode;
   getCredential: (origin: string) => { username: string; password: string } | null;
-  beforeSubmit: () => void; signal?: AbortSignal; fileFieldKey?: string;
+  beforeSubmit: () => void; signal?: AbortSignal; fileFieldKey?: string; closeOnNeedsInput?: boolean;
 };
 type BrowserSession = {
   input: BrowserRunInput; page: Page; flowOrigin: string; initialNavigation: boolean;
@@ -148,7 +148,8 @@ export class CareerBrowser {
   }
 
   private async finish(session: BrowserSession, outcome: RunResult): Promise<RunResult> {
-    if ((outcome.state === "needs_input" || outcome.state === "blocked") && this.isLive(session)) {
+    if (outcome.state === "needs_input" && session.input.closeOnNeedsInput) await this.close();
+    else if ((outcome.state === "needs_input" || outcome.state === "blocked") && this.isLive(session)) {
       const cs = await controls(session.page).catch(() => []);
       const pageSignature = session.page.url() + "|" + cs.map(c => c.name + ":" + c.key).join("|");
       for (const c of cs) session.initialValues.set(pageSignature + "|" + c.index + "|" + c.type + "|" + (c.name || c.key), controlValue(c));
