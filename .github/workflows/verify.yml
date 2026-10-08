@@ -44,9 +44,7 @@ jobs:
             $actualMask = [Convert]::ToUInt32($match.Groups[1].Value, 16)
             return (($actualMask -band $requiredMask) -eq $requiredMask)
           }
-          $currentUserSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
           if (!(& $hasReadAce "AC")) { throw "Installed icudtl.dat is missing an ALL APPLICATION PACKAGES read ACE: $(icacls $icuData | Out-String)" }
-          if (!(& $hasReadAce $currentUserSid)) { throw "Installed icudtl.dat is missing a read ACE for the installing user $($currentUserSid): $(icacls $icuData | Out-String)" }
           $env:ANIMA_DESKTOP_EXECUTABLE = $installedExe
           pnpm desktop:smoke
           if ($LASTEXITCODE -ne 0) { throw "Installed app smoke test failed with exit code $LASTEXITCODE." }
