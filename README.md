@@ -18,9 +18,13 @@ pnpm start
 
 Anima Connect peut aussi être installée comme application Windows x64. Elle ouvre l’interface depuis les fichiers installés et appelle son moteur local par IPC : **aucun serveur web ni port localhost n’est lancé**. SQLite et le profil de navigation Playwright sont conservés dans le dossier utilisateur Windows ; Chromium est inclus dans l’installation.
 
+[![Télécharger Anima Connect pour Windows x64](https://img.shields.io/badge/T%C3%A9l%C3%A9charger-Windows%20x64-0078D4?logo=windows&logoColor=white)](https://github.com/MarwaneKhalis/Anima-Connect/actions/workflows/verify.yml?query=branch%3Amain)
+
+Ouvre la dernière exécution réussie sur `main`, puis télécharge l’artefact **anima-connect-windows**. Il contient l’installateur Windows x64 et reste disponible pendant 30 jours.
+
 Dans l’onglet Offres, vous pouvez enregistrer des tableaux publics Greenhouse, Lever ou des pages avec données structurées, choisir une fréquence de collecte (6 heures à une semaine), actualiser une source ou la mettre en pause. Les collectes sont en lecture seule et s’exécutent lorsque l’application est ouverte; les offres absentes ne sont pas automatiquement supprimées. Les sources enregistrées sont locales et incluses dans la sauvegarde.
 
-Pour télécharger l’installateur depuis GitHub, ouvre l’exécution réussie du workflow **Verify Anima Connect** dans l’onglet *Actions*, puis télécharge l’artefact **anima-connect-windows**. Décompresse-le et lance `Anima Connect Setup 0.2.0.exe`.
+Décompresse l’artefact et lance `Anima Connect Setup 0.2.0.exe`.
 
 Pour créer l’installateur localement sous Windows avec Node.js 24 et pnpm :
 
