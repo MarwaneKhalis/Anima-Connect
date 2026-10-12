@@ -26,6 +26,12 @@ export interface JobOffer {
   id: string; url: string; title: string; company: string; location: string;
   description: string; sourceUrl: string; discoveredAt: string; updatedAt: string;
 }
+export type CareerSourceStatus = 'idle' | 'running' | 'succeeded' | 'failed';
+export interface CareerSource {
+  id: string; label: string; url: string; cadenceHours: number; enabled: boolean;
+  status: CareerSourceStatus; lastRunAt: string; nextRunAt: string; lastError: string;
+  lastFound: number; lastNew: number; lastUpdated: number; createdAt: string;
+}
 export interface MissingField {
   key: string; label: string; required: boolean;
   type: 'text' | 'boolean' | 'select' | 'file' | 'unknown';
@@ -46,14 +52,29 @@ export interface CareerEvent {
   id: string; applicationId: string; kind: string; detail: string;
   source: 'automation' | 'user'; happenedAt: string;
 }
+export interface EmployerResponse {
+  id: string; applicationId: string; receivedAt: string; channel: 'email' | 'phone' | 'portal' | 'other';
+  summary: string; nextStep: string; replyDraft: string; createdAt: string;
+}
 export interface CareerMetrics {
   savedJobs: number; applications: number; submitted: number;
   needsAttention: number; interviews: number; offers: number; rejected: number;
 }
 export interface CareerSnapshot {
   profile: CareerProfile; resumes: Resume[]; credentials: CredentialSummary[];
-  jobs: JobOffer[]; applications: Application[]; events: CareerEvent[];
-  metrics: CareerMetrics; vault: VaultStatus;
+  jobs: JobOffer[]; sources: CareerSource[]; applications: Application[]; events: CareerEvent[]; responses: EmployerResponse[];
+  metrics: CareerMetrics; vault: VaultStatus; manualSessionApplicationId: string | null;
+}
+export type CareerQueueStatus = 'idle' | 'running' | 'paused' | 'completed' | 'cancelled';
+export type CareerQueueItemStatus = 'queued' | 'running' | 'submitted' | 'blocked' | 'cancelled';
+export interface CareerQueueItem {
+  position: number; applicationId: string; credentialId: string | null; status: CareerQueueItemStatus;
+  lastError: string; updatedAt: string;
+}
+export interface CareerQueueSnapshot {
+  status: CareerQueueStatus; activeApplicationId: string | null;
+  pauseRequested: boolean; lastError: string; updatedAt: string;
+  items: CareerQueueItem[];
 }
 export interface RunResult {
   state: 'ready' | 'needs_input' | 'blocked' | 'submitted' | 'uncertain' | 'failed';
@@ -61,5 +82,6 @@ export interface RunResult {
 }
 export interface DiscoveryResult { jobs: JobOffer[]; note: string; }
 export interface CareerDiscovery {
+  validate?(url: string): Promise<URL>;
   discover(url: string): Promise<{ offers: Omit<JobOffer, 'id' | 'discoveredAt' | 'updatedAt'>[]; note: string }>;
 }

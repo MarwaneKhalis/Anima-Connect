@@ -145,6 +145,13 @@ test("career UI completes a real browser application flow and survives reload", 
   await page.reload({ waitUntil: "networkidle" });
   await page.getByRole("button", { name: "Candidatures" }).click();
   await page.getByRole("button", { name: "Ouvrir le suivi →" }).click();
+  await page.getByText("Enregistrer une réponse reçue").click();
+  await page.getByLabel("Résumé de la réponse").fill("Invitation reçue pour un entretien technique.");
+  await page.getByLabel("Prochaine étape").fill("Choisir un créneau");
+  await page.getByLabel("Brouillon de réponse").fill("Bonjour, merci pour votre invitation.");
+  await page.getByRole("button", { name: "Enregistrer la réponse" }).click();
+  await page.getByText("Invitation reçue pour un entretien technique.").waitFor();
+  assert.equal(app.fixture.submissions.length, 1, "logging a received reply must not send anything");
   await page
     .locator(".cw-receipt")
     .getByText(submitted.receipt.reference, { exact: false })
@@ -152,6 +159,8 @@ test("career UI completes a real browser application flow and survives reload", 
     .waitFor();
   const { value: afterReload } = await app.json("/api/career/bootstrap");
   assert.equal(afterReload.metrics.submitted, 1);
+  assert.equal(afterReload.responses.length, 1);
+  assert.equal(afterReload.responses[0].replyDraft, "Bonjour, merci pour votre invitation.");
   assert.equal(
     afterReload.events.filter(
       (event: any) =>

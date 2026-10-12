@@ -25,8 +25,12 @@ async function run(path: string, mode: RunMode, options: { answers?: Record<stri
   const b = browser();
   let marker = 0;
   const bytes = options.bytes || bytesA;
-  const outcome = await b.run({ application: app(options.answers), job: job(path), profile, resume: { meta: meta(bytes === bytesB ? "cv-b" : "cv-a", bytes), bytes }, mode, getCredential: () => options.credential || null, beforeSubmit: () => { marker++; } });
-  return { outcome, marker };
+  try {
+    const outcome = await b.run({ application: app(options.answers), job: job(path), profile, resume: { meta: meta(bytes === bytesB ? "cv-b" : "cv-a", bytes), bytes }, mode, getCredential: () => options.credential || null, beforeSubmit: () => { marker++; } });
+    return { outcome, marker };
+  } finally {
+    await b.close();
+  }
 }
 
 test("preparation fills standard form but sends no application", async () => {
@@ -124,6 +128,26 @@ test("CAPTCHA, MFA and foreign redirect stop before posting or credential use", 
   const b = browser();
   const bad = await b.run({ application: app(), job: job("/bad-origin"), profile, resume: { meta: meta("cv-a", bytesA), bytes: bytesA }, mode: "submit", getCredential: () => { credentials++; return { username: "x", password: "y" }; }, beforeSubmit: () => assert.fail("must not submit") });
   assert.equal(bad.state, "blocked"); assert.equal(credentials, 0); assert.equal(fx.submissions.length, count);
+  await b.close();
+});
+test("a human challenge leaves Chromium open and resumes the same page after it is cleared", async () => {
+  const count = fx.submissions.length;
+  const b = browser();
+  const resume = { meta: meta("cv-a", bytesA), bytes: bytesA };
+  const input = (mode: RunMode) => ({
+    application: app(), job: job("/human-resume"), profile, resume, mode,
+    getCredential: () => null, beforeSubmit: () => {},
+  });
+  const stopped = await b.run(input("submit"));
+  assert.equal(stopped.state, "blocked");
+  assert.equal(b.pendingApplicationId(), "app");
+  await new Promise((resolve) => setTimeout(resolve, 900));
+
+  const resumed = await b.run(input("submit"));
+  assert.equal(resumed.state, "submitted", resumed.message);
+  assert.equal(fx.submissions.length, count + 1);
+  assert.equal(b.pendingApplicationId(), null);
+  await b.close();
 });
 test("missing receipt is uncertain after exactly one POST", async () => {
   const count = fx.submissions.length;
@@ -184,6 +208,7 @@ test("runner rejects parallel runs and never repeats uncertain submission", asyn
   store.recoverInterruptedRuns();
   assert.throws(() => new CareerRunner(store, vault, browser()).start(first.id, "submit"));
   assert.equal(fx.submissions.length, count + 1);
+  await runner.stop();
   db.db.close();
 });
 test("runner stop persists failed before marker and uncertain after marker", async () => {

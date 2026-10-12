@@ -13,14 +13,24 @@ export class CareerRunner {
   private browser: CareerBrowser;
   constructor(store: CareerStore, vault: Vault, browser: CareerBrowser) { this.store = store; this.vault = vault; this.browser = browser; }
   isBusy(): boolean { return this.active !== null; }
+  pendingApplicationId(): string | null { return this.browser.pendingApplicationId(); }
+  async closeManualSession(): Promise<boolean> {
+    if (this.active) throw new CareerError(409, "browser_busy", "Un parcours navigateur est déjà en cours.");
+    return this.browser.closePendingSession();
+  }
 
   start(id: string, mode: RunMode, credentialId?: string): Application {
     if (this.active) throw new CareerError(409, "browser_busy", "Un parcours est déjà en cours.");
-    const application = this.store.claimRun(id);
-    const job: JobOffer = structuredClone(this.store.getJob(application.jobId));
+    const pendingId = this.browser.pendingApplicationId();
+    if (pendingId && pendingId !== id) throw new CareerError(409, "manual_session_busy", "Terminez ou fermez la session navigateur ouverte avant de démarrer une autre candidature.");
+    // Read all resources before claiming the row, so a missing/corrupt CV or
+    // database error cannot leave the application stuck in `running`.
+    const beforeClaim = this.store.getApplication(id);
+    const job: JobOffer = structuredClone(this.store.getJob(beforeClaim.jobId));
     const profile: CareerProfile = structuredClone(this.store.getProfile());
-    const saved = this.store.getResume(application.resumeId);
+    const saved = this.store.getResume(beforeClaim.resumeId);
     const resume: { meta: Resume; bytes: Buffer } = { meta: structuredClone(saved.meta), bytes: Buffer.from(saved.bytes) };
+    const application = this.store.claimRun(id);
     const snapshot = structuredClone(application);
     const abort = new AbortController();
     this.abort = abort;

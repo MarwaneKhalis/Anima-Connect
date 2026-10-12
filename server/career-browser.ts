@@ -1,11 +1,18 @@
 import { isIP } from "node:net";
 import { lookup } from "node:dns/promises";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
+import { isPublicAddress } from "./network-safety.ts";
 import type {
   Application, CareerProfile, JobOffer, MissingField, Receipt, Resume, RunMode, RunResult,
 } from "../src/shared/career.ts";
 
 export interface CareerBrowserOptions { headless?: boolean; allowedTestOrigins?: string[] }
+export interface CareerBrowserInput {
+  application: Application; job: JobOffer; profile: CareerProfile;
+  resume: { meta: Resume; bytes: Buffer }; mode: RunMode;
+  getCredential: (origin: string) => { username: string; password: string } | null;
+  beforeSubmit: () => void; signal?: AbortSignal;
+}
 type Control = { index: number; tag: string; type: string; label: string; name: string; key: string; required: boolean; value: string; checked: boolean; options: string[] };
 type Button = { index: number; text: string; disabled: boolean };
 const tidy = (s: string) => s.replace(/([a-z])([A-Z])/g, "$1 $2").normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
@@ -26,11 +33,19 @@ async function assertPublic(url: URL, testOrigins: Set<string>): Promise<void> {
   safeUrl(url.href, testOrigins);
   if (testOrigins.has(url.origin)) return;
   const addresses = await lookup(url.hostname, { all: true });
-  if (!addresses.length || addresses.some(({ address }) => {
-    const ip = address.toLowerCase();
-    return /^10\.|^127\.|^0\.|^169\.254\.|^172\.(1[6-9]|2\d|3[01])\.|^192\.168\.|^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(ip)
-      || ip === "::1" || ip === "::" || ip.startsWith("fc") || ip.startsWith("fd") || ip.startsWith("fe80:");
-  })) throw new Error("Destination réseau privée interdite.");
+  if (!addresses.length || addresses.some(({ address }) => !isPublicAddress(address)))
+    throw new Error("Destination réseau privée ou spéciale interdite.");
+  if (!addresses.some(({ family }) => family === 4))
+    throw new Error("Cette candidature exige une adresse publique IPv4 pour épingler la connexion navigateur.");
+}
+
+async function pinnedIPv4(url: URL): Promise<string | null> {
+  const addresses = await lookup(url.hostname, { all: true, verbatim: true });
+  if (!addresses.length || addresses.some(({ address }) => !isPublicAddress(address)))
+    throw new Error("Destination réseau privée ou spéciale interdite.");
+  const address = addresses.find(({ family }) => family === 4)?.address;
+  if (!address) throw new Error("Cette candidature exige une adresse publique IPv4 pour épingler la connexion navigateur.");
+  return address;
 }
 
 const knownValue = (key: string, p: CareerProfile): string | undefined => {
@@ -108,9 +123,22 @@ export class CareerBrowser {
   private active = false;
   private options: CareerBrowserOptions;
   private readonly testOrigins: Set<string>;
+  private pendingSession: { input: CareerBrowserInput; page: Page } | null = null;
   constructor(options: CareerBrowserOptions = {}) { this.options = options; this.testOrigins = new Set(options.allowedTestOrigins || []); }
 
+  pendingApplicationId(): string | null {
+    if (this.pendingSession?.page.isClosed()) this.pendingSession = null;
+    return this.pendingSession?.input.application.id || null;
+  }
+
+  async closePendingSession(): Promise<boolean> {
+    if (this.active || !this.pendingSession) return false;
+    await this.close();
+    return true;
+  }
+
   async close(): Promise<void> {
+    this.pendingSession = null;
     await this.context?.close().catch(() => {}); this.context = undefined;
     await this.browser?.close().catch(() => {}); this.browser = undefined;
   }
@@ -121,55 +149,92 @@ export class CareerBrowser {
     return { offers: [], note: "Découverte navigateur non prise en charge ; utilisez une page carrière publique compatible." };
   }
 
-  async run(input: { application: Application; job: JobOffer; profile: CareerProfile; resume: {meta: Resume; bytes: Buffer}; mode: RunMode; getCredential: (origin: string) => {username:string; password:string}|null; beforeSubmit: () => void; signal?: AbortSignal }): Promise<RunResult> {
+  async run(input: CareerBrowserInput): Promise<RunResult> {
     if (this.active) return result("blocked", "Un autre parcours navigateur est déjà actif.");
     this.active = true;
     let submittedClick = false;
+    let keepOpen = false;
+    let resumingManual = false;
+    let page: Page | undefined;
+    let flowOrigin = "";
+    const hold = (outcome: RunResult) => {
+      if (["ready", "needs_input", "blocked", "uncertain"].includes(outcome.state) && page && !page.isClosed()) {
+        this.pendingSession = { input, page };
+        keepOpen = true;
+      }
+      return outcome;
+    };
     try {
-      const start = safeUrl(input.job.url, this.testOrigins);
-      await assertPublic(start, this.testOrigins);
-      this.browser = await chromium.launch({ headless: this.options.headless ?? false });
-      this.context = await this.browser.newContext({ acceptDownloads: false, viewport: { width: 1365, height: 900 } });
-      this.context.setDefaultTimeout(10_000);
-      this.context.setDefaultNavigationTimeout(20_000);
-      let flowOrigin = start.origin;
-      let initialNavigation = true;
-      await this.context.route("**/*", async route => {
-        const request = route.request();
-        let url: URL;
-        try { url = new URL(request.url()); } catch { return route.abort(); }
-        if (url.origin !== flowOrigin) {
-          if (initialNavigation && request.isNavigationRequest() && request.redirectedFrom()) {
-            try { await assertPublic(url, this.testOrigins); flowOrigin = url.origin; } catch { return route.abort(); }
-          } else return route.abort();
+      const pending = this.pendingSession;
+      if (pending && !pending.page.isClosed()) {
+        if (pending.input.application.id !== input.application.id) {
+          keepOpen = true;
+          return result("blocked", "Terminez ou fermez la session navigateur déjà ouverte avant de démarrer une autre candidature.");
         }
-        return route.continue();
-      });
-      const page = await this.context.newPage();
-      await page.goto(start.href, { waitUntil: "domcontentloaded" });
-      initialNavigation = false;
-      flowOrigin = new URL(page.url()).origin;
+        this.pendingSession = null;
+        input = { ...pending.input, ...input };
+        resumingManual = true;
+        page = pending.page;
+        flowOrigin = new URL(page.url()).origin;
+      } else {
+        this.pendingSession = null;
+        if (this.context || this.browser) await this.close();
+        const start = safeUrl(input.job.url, this.testOrigins);
+        await assertPublic(start, this.testOrigins);
+        const pinnedAddress = this.testOrigins.has(start.origin) ? null : await pinnedIPv4(start);
+        this.browser = await chromium.launch({
+          headless: this.options.headless ?? false,
+          ...(pinnedAddress ? { args: [`--host-resolver-rules=MAP ${start.hostname} ${pinnedAddress}`] } : {}),
+        });
+        this.context = await this.browser.newContext({ acceptDownloads: false, serviceWorkers: "block", viewport: { width: 1365, height: 900 } });
+        this.context.setDefaultTimeout(10_000);
+        this.context.setDefaultNavigationTimeout(20_000);
+        flowOrigin = start.origin;
+        let initialNavigation = true;
+        await this.context.route("**/*", async route => {
+          const request = route.request();
+          let url: URL;
+          try { url = new URL(request.url()); } catch { return route.abort(); }
+          if (url.origin !== flowOrigin) {
+            if (initialNavigation && request.isNavigationRequest() && request.redirectedFrom()
+              && this.testOrigins.has(flowOrigin) && this.testOrigins.has(url.origin)) {
+              try { await assertPublic(url, this.testOrigins); flowOrigin = url.origin; } catch { return route.abort(); }
+            } else return route.abort();
+          }
+          return route.continue();
+        });
+        page = await this.context.newPage();
+        await page.goto(start.href, { waitUntil: "domcontentloaded" });
+        initialNavigation = false;
+        flowOrigin = new URL(page.url()).origin;
+      }
+      const activePage = page!;
       const seen = new Set<string>();
       let loggedIn = false;
       for (let step = 0; step < 10; step++) {
         if (input.signal?.aborted) return result("failed", "Parcours interrompu avant l’envoi.");
-        if (new URL(page.url()).origin !== flowOrigin) return result("blocked", "Redirection vers une autre origine : action manuelle requise.");
-        const body = await page.locator("body").innerText().catch(() => "");
-        if (obstacle(body) || await page.locator('iframe[src*="captcha" i], [class*="captcha" i], [id*="captcha" i]').count()) return result("blocked", "Vérification CAPTCHA ou MFA : intervention manuelle requise.");
-        const cs = await controls(page);
+        if (new URL(activePage.url()).origin !== flowOrigin) return hold(result("blocked", "Redirection vers une autre origine : action manuelle requise."));
+        const body = await activePage.locator("body").innerText().catch(() => "");
+        const challenge = activePage.locator('iframe[src*="captcha" i], [class*="captcha" i], [id*="captcha" i]');
+        const challengeVisible = await challenge.evaluateAll(nodes => nodes.some(node => {
+          const style = getComputedStyle(node);
+          return style.display !== "none" && style.visibility !== "hidden" && node.getClientRects().length > 0;
+        })).catch(() => false);
+        if (obstacle(body) || challengeVisible) return hold(result("blocked", "Vérification CAPTCHA ou MFA : intervenez dans le navigateur ouvert, puis reprenez cette session."));
+        const cs = await controls(activePage);
         if (cs.some(c => c.type === "password")) {
-          if (loggedIn) return result("blocked", "Connexion non terminée ; intervention manuelle requise.");
+          if (loggedIn) return hold(result("blocked", "Connexion non terminée ; intervention manuelle requise dans le navigateur ouvert."));
           const credential = input.getCredential(flowOrigin);
-          if (!credential) return result("blocked", "Compte requis pour cette origine ; enregistrez ses identifiants dans le coffre.");
+          if (!credential) return hold(result("blocked", "Compte requis pour cette origine ; enregistrez ses identifiants dans le coffre, connectez-vous dans le navigateur, puis reprenez la session."));
           const user = cs.find(c => c.type === "email" || /^(username|user name|email|e mail|identifiant|login)$/i.test(tidy(c.key)));
           const pass = cs.find(c => c.type === "password");
-          const action = (await buttons(page)).filter(b => !b.disabled && loginButton(b.text));
-          if (!user || !pass || action.length !== 1) return result("blocked", "Formulaire de connexion ambigu.");
-          const loginControl = page.locator("input, select, textarea").nth(pass.index);
-          if (!await sameOriginForm(page, loginControl, flowOrigin)) return result("blocked", "Connexion vers une origine différente interdite.");
-          await page.locator("input, select, textarea").nth(user.index).fill(credential.username);
-          await page.locator("input, select, textarea").nth(pass.index).fill(credential.password);
-          await advance(page, page.locator('button, input[type="submit"]').nth(action[0].index));
+          const action = (await buttons(activePage)).filter(b => !b.disabled && loginButton(b.text));
+          if (!user || !pass || action.length !== 1) return hold(result("blocked", "Formulaire de connexion ambigu."));
+          const loginControl = activePage.locator("input, select, textarea").nth(pass.index);
+          if (!await sameOriginForm(activePage, loginControl, flowOrigin)) return hold(result("blocked", "Connexion vers une origine différente interdite."));
+          await activePage.locator("input, select, textarea").nth(user.index).fill(credential.username);
+          await activePage.locator("input, select, textarea").nth(pass.index).fill(credential.password);
+          await advance(activePage, activePage.locator('button, input[type="submit"]').nth(action[0].index));
           loggedIn = true;
           continue;
         }
@@ -194,11 +259,13 @@ export class CareerBrowser {
           const desired = typeof answer === "boolean" ? (answer ? "yes" : "no") : typeof answer === "string" ? tidy(answer) : "";
           const selected = desired ? group.find(c => tidy(c.value) === desired || tidy(c.label) === desired) : undefined;
           if (selected) {
-            await page.locator("input, select, textarea").nth(selected.index).check();
+            await activePage.locator("input, select, textarea").nth(selected.index).check();
+          } else if (resumingManual && answer === undefined && group.some(c => c.checked)) {
+            // Preserve a choice made in the visible browser before resuming.
           } else if (required || answer !== undefined) {
             missing.push({ key, label, required, type: "select", options });
           } else {
-            for (const c of group) await page.locator("input, select, textarea").nth(c.index).evaluate(el => { (el as HTMLInputElement).checked = false; (el as HTMLInputElement).disabled = true; });
+            for (const c of group) await activePage.locator("input, select, textarea").nth(c.index).evaluate(el => { (el as HTMLInputElement).checked = false; (el as HTMLInputElement).disabled = true; });
           }
         }
         for (const c of cs) {
@@ -208,7 +275,7 @@ export class CareerBrowser {
           const aliases = new Set([key, tidy(c.label), tidy(c.key)]);
           const explicit = explicitFor(...aliases);
           const value = explicit === undefined ? knownValue(tidy(c.label || c.key), input.profile) : explicit;
-          const loc = page.locator("input, select, textarea").nth(c.index);
+          const loc = activePage.locator("input, select, textarea").nth(c.index);
           if (c.type === "file") {
             if (/\b(cv|resume|curriculum vitae)\b/i.test(key)) await loc.setInputFiles({ name: input.resume.meta.filename, mimeType: input.resume.meta.mime, buffer: input.resume.bytes });
             else if (c.required) missing.push({ key, label: c.label || c.key, required: true, type: "file" });
@@ -216,8 +283,8 @@ export class CareerBrowser {
           }
           if (c.type === "checkbox") {
             if (typeof value === "boolean") { if (value) await loc.check(); else await loc.uncheck().catch(() => {}); }
-            else await loc.uncheck().catch(() => {});
-            if (c.required && value !== true) missing.push({ key, label: c.label || c.key, required: true, type: "boolean" });
+            else if (!resumingManual || !c.checked) await loc.uncheck().catch(() => {});
+            if (c.required && value !== true && !(resumingManual && value === undefined && c.checked)) missing.push({ key, label: c.label || c.key, required: true, type: "boolean" });
             continue;
           }
           if (c.tag === "select") {
@@ -226,6 +293,8 @@ export class CareerBrowser {
               const match = c.options.find(o => tidy(o) === desired);
               if (match) await loc.selectOption({ label: match });
               else missing.push({ key, label: c.label || c.key, required: c.required, type: "select", options: c.options });
+            } else if (resumingManual && c.value) {
+              // Preserve a choice made in the visible browser before resuming.
             } else if (c.required) missing.push({ key, label: c.label || c.key, required: true, type: "select", options: c.options });
             else {
               const blank = c.options.find(o => !tidy(o));
@@ -235,46 +304,48 @@ export class CareerBrowser {
             continue;
           }
           if (typeof value === "string" && value) await loc.fill(value);
+          else if (resumingManual && c.value) {
+            // Preserve text the user entered while the browser was paused.
+          }
           else if (c.required) missing.push({ key, label: c.label || c.key, required: true, type: missingType(c) });
-          else if (c.value) await loc.fill("");
         }
-        if (missing.length) return result("needs_input", "Renseignez les champs requis avant l’envoi.", missing);
-        const actions = (await buttons(page)).filter(b => !b.disabled);
+        if (missing.length) return hold(result("needs_input", "Renseignez les champs requis dans le formulaire ou ici, puis reprenez la session.", missing));
+        const actions = (await buttons(activePage)).filter(b => !b.disabled);
         const finals = actions.filter(b => finalButton(b.text));
         const nexts = actions.filter(b => nextButton(b.text));
-        if (finals.length > 1 || nexts.length > 1 || (finals.length && nexts.length)) return result("blocked", "Plusieurs actions possibles : sélection manuelle requise.");
+        if (finals.length > 1 || nexts.length > 1 || (finals.length && nexts.length)) return hold(result("blocked", "Plusieurs actions possibles : sélection manuelle requise."));
         if (nexts.length === 1) {
-          const nextControl = page.locator('button, input[type="submit"]').nth(nexts[0].index);
-          if (!await sameOriginForm(page, nextControl, flowOrigin)) return result("blocked", "Étape suivante vers une origine différente interdite.");
-          const fingerprint = `${page.url()}|${cs.map(c => c.key).join("|")}`;
-          if (seen.has(fingerprint)) return result("blocked", "Le formulaire tourne en boucle.");
+          const nextControl = activePage.locator('button, input[type="submit"]').nth(nexts[0].index);
+          if (!await sameOriginForm(activePage, nextControl, flowOrigin)) return hold(result("blocked", "Étape suivante vers une origine différente interdite."));
+          const fingerprint = `${activePage.url()}|${cs.map(c => c.key).join("|")}`;
+          if (seen.has(fingerprint)) return hold(result("blocked", "Le formulaire tourne en boucle."));
           seen.add(fingerprint);
-          await advance(page, nextControl);
+          await advance(activePage, nextControl);
           continue;
         }
-        if (finals.length !== 1) return result("blocked", "Bouton final de candidature introuvable ou ambigu.");
-        const finalControl = page.locator('button, input[type="submit"]').nth(finals[0].index);
-        if (!await sameOriginForm(page, finalControl, flowOrigin)) return result("blocked", "Envoi vers une origine différente interdit.");
-        if (input.mode === "prepare") return result("ready", "Formulaire prêt à être envoyé.");
+        if (finals.length !== 1) return hold(result("blocked", "Bouton final de candidature introuvable ou ambigu."));
+        const finalControl = activePage.locator('button, input[type="submit"]').nth(finals[0].index);
+        if (!await sameOriginForm(activePage, finalControl, flowOrigin)) return hold(result("blocked", "Envoi vers une origine différente interdite."));
+        if (input.mode === "prepare") return hold(result("ready", "Formulaire prêt à être envoyé. Le portail reste ouvert ; vérifiez-le avant de reprendre ou d’envoyer."));
         if (input.signal?.aborted) return result("failed", "Parcours interrompu avant l’envoi.");
-        const beforeText = await page.locator("body").innerText().catch(() => "");
+        const beforeText = await activePage.locator("body").innerText().catch(() => "");
         // This callback commits the durable submitting marker before any final click.
         input.beforeSubmit();
         submittedClick = true;
         await finalControl.click();
-        await page.waitForLoadState("domcontentloaded").catch(() => {});
+        await activePage.waitForLoadState("domcontentloaded").catch(() => {});
         for (let retry = 0; retry < 10; retry++) {
-          const proof = await receipt(page, beforeText);
+          const proof = await receipt(activePage, beforeText);
           if (proof) return result("submitted", "Candidature confirmée.", [], proof);
-          await page.waitForTimeout(250);
+          await activePage.waitForTimeout(250);
         }
-        return result("uncertain", "Le clic a eu lieu mais aucun reçu vérifiable n’est apparu.");
+        return hold(result("uncertain", "Le clic a eu lieu mais aucun reçu vérifiable n’est apparu. Vérifiez la page laissée ouverte avant de résoudre l’envoi."));
       }
-      return result("blocked", "Le formulaire dépasse dix étapes.");
+      return hold(result("blocked", "Le formulaire dépasse dix étapes."));
     } catch {
-      return result(submittedClick ? "uncertain" : "blocked", submittedClick ? "L’envoi a peut-être eu lieu ; vérifiez manuellement avant toute nouvelle tentative." : "Le navigateur n’a pas pu terminer ce formulaire.");
+      return hold(result(submittedClick ? "uncertain" : "blocked", submittedClick ? "L’envoi a peut-être eu lieu ; vérifiez manuellement avant toute nouvelle tentative." : "Le navigateur n’a pas pu terminer ce formulaire."));
     } finally {
-      await this.close();
+      if (!keepOpen) await this.close();
       this.active = false;
     }
   }

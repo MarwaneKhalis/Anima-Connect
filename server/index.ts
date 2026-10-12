@@ -22,8 +22,10 @@ import { CareerStore } from "./career-store.ts";
 import { Vault } from "./vault.ts";
 import { CareerBrowser } from "./career-browser.ts";
 import { CareerRunner } from "./career-runner.ts";
+import { CareerQueue } from "./career-queue.ts";
 import { handleCareerApi } from "./career-api.ts";
 import { JobDiscovery } from "./job-discovery.ts";
+import { CareerSourceScheduler } from "./career-source-scheduler.ts";
 import { csvParse, csvStringify, makeSearchUrl } from "./domain.ts";
 import type { Prospect, SavedSearch, Template } from "../src/shared/types.ts";
 
@@ -59,14 +61,22 @@ const careerBrowser = new CareerBrowser({
 });
 const discovery = new JobDiscovery(allowedTestOrigins);
 let careerStore = new CareerStore(realStore.db, careerOptions);
+careerStore.recoverSourceRuns();
+const sourceScheduler = new CareerSourceScheduler(careerStore, discovery);
+sourceScheduler.start();
 let vault = new Vault(realStore.db, careerOptions);
 let runner = new CareerRunner(careerStore, vault, careerBrowser);
 careerStore.recoverInterruptedRuns();
+let queue = new CareerQueue(careerStore, runner);
+careerStore.recoverInterruptedQueue();
 const demoCareerStore = new CareerStore(demoStore.db);
 const demoVault = new Vault(demoStore.db);
 const demoBrowser = new CareerBrowser();
 const demoRunner = new CareerRunner(demoCareerStore, demoVault, demoBrowser);
 demoCareerStore.seedDemo();
+const demoQueue = new CareerQueue(demoCareerStore, demoRunner);
+demoCareerStore.recoverInterruptedRuns();
+demoCareerStore.recoverInterruptedQueue();
 
 function respond(res: ServerResponse, status: number, value: unknown) {
   res.writeHead(status, {
@@ -148,7 +158,23 @@ function staticFile(pathname: string, res: ServerResponse) {
   res.end(readFileSync(target));
 }
 
-export async function handleRequest(req: IncomingMessage, res: ServerResponse) {
+let maintenance = false;
+let maintenanceThreshold = 0;
+let restoreReserved = false;
+let shuttingDown = false;
+let activeRequests = 0;
+const drainWaiters: { threshold: number; resolve: () => void }[] = [];
+function signalDrained() {
+  for (let i = drainWaiters.length - 1; i >= 0; i--) {
+    if (activeRequests <= drainWaiters[i].threshold) drainWaiters.splice(i, 1)[0].resolve();
+  }
+}
+function waitForRequests(threshold: number): Promise<void> {
+  if (activeRequests <= threshold) return Promise.resolve();
+  return new Promise((resolve) => drainWaiters.push({ threshold, resolve }));
+}
+
+async function handleRequestInternal(req: IncomingMessage, res: ServerResponse) {
   const hosts = [`127.0.0.1:${port}`, `localhost:${port}`];
   if (
     !hosts.includes(req.headers.host || "") ||
@@ -188,7 +214,9 @@ export async function handleRequest(req: IncomingMessage, res: ServerResponse) {
         store: demo ? demoCareerStore : careerStore,
         vault: demo ? demoVault : vault,
         runner: demo ? demoRunner : runner,
+        queue: demo ? demoQueue : queue,
         discovery,
+        sourceScheduler: demo ? undefined : sourceScheduler,
         demo,
         allowedTestOrigins,
       })
@@ -472,16 +500,22 @@ export async function handleRequest(req: IncomingMessage, res: ServerResponse) {
       return;
     }
     if (method === "POST" && path === "/api/restore") {
-      if (demo)
-        throw new Error("Quittez le mode démo pour restaurer une sauvegarde.");
-      if (req.headers["content-type"] !== "application/octet-stream")
-        throw new Error("Fichier SQLite attendu.");
-      const bytes = await body(req, 100_000_000);
-      if (bytes.subarray(0, 16).toString("ascii") !== "SQLite format 3\0")
-        throw new Error("Ce fichier n’est pas une base SQLite.");
-      const temp = join(dataDir, `restore-${randomUUID()}.sqlite`);
-      writeFileSync(temp, bytes);
+      if (restoreReserved) {
+        respond(res, 409, { error: "Une restauration est déjà en cours.", code: "maintenance" });
+        return;
+      }
+      restoreReserved = true;
+      let temp = "";
       try {
+        if (demo)
+          throw new Error("Quittez le mode démo pour restaurer une sauvegarde.");
+        if (req.headers["content-type"] !== "application/octet-stream")
+          throw new Error("Fichier SQLite attendu.");
+        const bytes = await body(req, 100_000_000);
+        if (bytes.subarray(0, 16).toString("ascii") !== "SQLite format 3\0")
+          throw new Error("Ce fichier n’est pas une base SQLite.");
+        temp = join(dataDir, `restore-${randomUUID()}.sqlite`);
+        writeFileSync(temp, bytes);
         const check = new DatabaseSync(temp, { readOnly: true });
         const tables = check
           .prepare("SELECT name FROM sqlite_master WHERE type='table'")
@@ -493,34 +527,48 @@ export async function handleRequest(req: IncomingMessage, res: ServerResponse) {
           )
         )
           throw new Error("Sauvegarde Anima Connect incomplète.");
+        maintenance = true;
+        maintenanceThreshold = 1;
+        await waitForRequests(maintenanceThreshold);
+        await queue.pauseAfterActive();
+        await sourceScheduler.stop();
         await runner.stop();
         vault.lock();
         await browser.close();
         realStore.close();
-        const rollback = join(
-          dataDir,
-          `avant-restauration-${Date.now()}.sqlite`,
-        );
+        const rollback = join(dataDir, `avant-restauration-${Date.now()}.sqlite`);
         copyFileSync(realPath, rollback);
         try {
           renameSync(temp, realPath);
           realStore = new Store(realPath);
           careerStore = new CareerStore(realStore.db, careerOptions);
+          careerStore.recoverSourceRuns();
           vault = new Vault(realStore.db, careerOptions);
           runner = new CareerRunner(careerStore, vault, careerBrowser);
           careerStore.recoverInterruptedRuns();
+          queue = new CareerQueue(careerStore, runner);
+          careerStore.recoverInterruptedQueue();
+          sourceScheduler.setStore(careerStore);
+          sourceScheduler.start();
         } catch (error) {
           copyFileSync(rollback, realPath);
           realStore = new Store(realPath);
           careerStore = new CareerStore(realStore.db, careerOptions);
+          careerStore.recoverSourceRuns();
           vault = new Vault(realStore.db, careerOptions);
           runner = new CareerRunner(careerStore, vault, careerBrowser);
           careerStore.recoverInterruptedRuns();
+          queue = new CareerQueue(careerStore, runner);
+          careerStore.recoverInterruptedQueue();
+          sourceScheduler.setStore(careerStore);
+          sourceScheduler.start();
           throw error;
         }
         respond(res, 200, { restored: true, safetyCopy: rollback });
       } finally {
-        rmSync(temp, { force: true });
+        if (!shuttingDown) { maintenance = false; maintenanceThreshold = 0; signalDrained(); }
+        if (temp) rmSync(temp, { force: true });
+        restoreReserved = false;
       }
       return;
     }
@@ -530,21 +578,43 @@ export async function handleRequest(req: IncomingMessage, res: ServerResponse) {
   }
 }
 const electronMode = process.env.ANIMA_ELECTRON_MODE === "1";
+export async function handleRequest(req: IncomingMessage, res: ServerResponse) {
+  const path = new URL(req.url || "/", `http://127.0.0.1:${port}`).pathname;
+  if (maintenance) {
+    respond(res, path === "/api/restore" ? 409 : 503, { error: "Une restauration ou fermeture est en cours. Réessayez ensuite.", code: "maintenance" });
+    return;
+  }
+  activeRequests++;
+  try { await handleRequestInternal(req, res); }
+  finally { activeRequests--; signalDrained(); }
+}
+
 const server = electronMode ? undefined : createServer(handleRequest);
 
 if (server)
   server.listen(port, "127.0.0.1", () =>
     console.log(`Anima Connect : http://127.0.0.1:${port}`),
   );
-async function shutdown() {
+let shutdownPromise: Promise<void> | undefined;
+async function shutdownOnce() {
+  shuttingDown = true;
+  maintenance = true;
+  maintenanceThreshold = 0;
+  await waitForRequests(maintenanceThreshold);
+  await sourceScheduler.stop();
+  await queue.pauseAfterActive();
   await runner.stop();
   await demoRunner.stop();
   vault.lock();
   demoVault.lock();
   await browser.close();
-  server?.close();
+  if (server?.listening) await new Promise<void>((resolve) => server.close(() => resolve()));
   realStore.close();
   demoStore.close();
+}
+function shutdown() {
+  if (!shutdownPromise) shutdownPromise = shutdownOnce();
+  return shutdownPromise;
 }
 if (!electronMode) {
   process.on("SIGINT", shutdown);

@@ -1,7 +1,8 @@
 import { lookup } from "node:dns/promises";
-import { isIP } from "node:net";
 import { request as requestHttps } from "node:https";
 import { request as requestHttp } from "node:http";
+import { isIP } from "node:net";
+import { isPublicAddress } from "./network-safety.ts";
 import type { CareerDiscovery, JobOffer } from "../src/shared/career.ts";
 
 type Offer = Omit<JobOffer, "id" | "discoveredAt" | "updatedAt">;
@@ -12,27 +13,7 @@ const text = (value: unknown) =>
         .replace(/\s+/g, " ")
         .trim()
     : "";
-function publicIp(ip: string): boolean {
-  if (isIP(ip) === 4) {
-    const [a, b] = ip.split(".").map(Number);
-    return !(
-      a === 0 ||
-      a === 10 ||
-      a === 127 ||
-      a >= 224 ||
-      (a === 169 && b === 254) ||
-      (a === 172 && b >= 16 && b <= 31) ||
-      (a === 192 && b === 168) ||
-      (a === 100 && b >= 64 && b <= 127) ||
-      (a === 198 && (b === 18 || b === 19))
-    );
-  }
-  return (
-    isIP(ip) === 6 &&
-    !/^(::|fc|fd|fe8|fe9|fea|feb|ff)/i.test(ip) &&
-    !ip.includes(".")
-  );
-}
+const publicIp = isPublicAddress;
 export class JobDiscovery implements CareerDiscovery {
   private allowed: Set<string>;
   constructor(allowedTestOrigins: string[] = []) {

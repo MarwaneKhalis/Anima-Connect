@@ -96,6 +96,10 @@ export async function startCareerFixtures(): Promise<CareerFixtures> {
     if (path === "/login") { page(res, `<form action="/login" method="post"><label>Username <input name="username" required></label><label>Password <input type="password" name="password" required></label><button type="submit">Sign in</button></form>`); return; }
     if (path === "/readonly-login") { page(res, `<form action="/login" method="post"><label>Username <input name="username" required></label><label>Password <input type="password" name="password" readonly required></label><button type="submit">Sign in</button></form>`); return; }
     if (path === "/simple" || path === "/login-apply" || path === "/alternate") { page(res, simple("/submit")); return; }
+    if (path === "/human-resume") {
+      page(res, `<div id="human-challenge">CAPTCHA verification required</div>${simple("/submit")}<script>setTimeout(() => document.querySelector('#human-challenge')?.remove(), 700)</script>`);
+      return;
+    }
     if (path === "/hidden-cv") { page(res, `<form action="/submit" method="post" enctype="multipart/form-data">${identity}<label>CV <input type="file" name="resume" style="display:none" required></label><button type="submit">Send application</button></form>`); return; }
     if (path === "/unknown") { page(res, simple("/submit", `<label>Work authorization <select name="workAuthorization" required><option value="">Choose</option><option>Yes</option><option>No</option></select></label>`)); return; }
     if (path === "/select-default") { page(res, simple("/submit", `<label>Work authorization <select name="workAuthorization" required><option>Yes</option><option>No</option></select></label>`)); return; }

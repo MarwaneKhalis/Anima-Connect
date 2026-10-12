@@ -1,14 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 import { apiFetch, downloadResponse } from "./api.ts";
 import Legacy, { type Tab as LegacyTab } from "./App.tsx";
+import CareerResponseLog from "./CareerResponseLog.tsx";
 import type {
   Application,
   AnswerValue,
   CareerProfile,
+  CareerQueueSnapshot,
   CareerSnapshot,
   JobOffer,
   RunMode,
 } from "../src/shared/career.ts";
+import { matchJob } from "../src/shared/job-fit.ts";
 
 type Tab =
   "home" | "jobs" | "applications" | "profile" | "vault" | "prospecting";
@@ -53,6 +56,10 @@ const date = (s: string) =>
 const labelJob = (snapshot: CareerSnapshot, a: Application) =>
   snapshot.jobs.find((j) => j.id === a.jobId);
 const active = (a: Application) => ["running", "submitting"].includes(a.state);
+const emptyQueue = (): CareerQueueSnapshot => ({
+  status: "idle", activeApplicationId: null, pauseRequested: false,
+  lastError: "", updatedAt: "", items: [],
+});
 
 export default function CareerWorkspace() {
   const [tab, setTab] = useState<Tab>("home"),
@@ -62,11 +69,14 @@ export default function CareerWorkspace() {
   );
   const [data, setData] = useState<CareerSnapshot | null>(null),
     [profile, setProfile] = useState<CareerProfile | null>(null);
+  const [queue, setQueue] = useState<CareerQueueSnapshot>(emptyQueue);
   const [busy, setBusy] = useState(false),
     [error, setError] = useState(""),
     [notice, setNotice] = useState("");
   const [query, setQuery] = useState(""),
     [source, setSource] = useState(""),
+    [sourceName, setSourceName] = useState(""),
+    [sourceCadence, setSourceCadence] = useState(24),
     [jobDraft, setJobDraft] = useState({
       url: "",
       title: "",
@@ -77,9 +87,7 @@ export default function CareerWorkspace() {
   const [resumeId, setResumeId] = useState(""),
     [credentialId, setCredentialId] = useState(""),
     [detail, setDetail] = useState<string | null>(null);
-  const [selected, setSelected] = useState<string[]>([]),
-    [batch, setBatch] = useState(false),
-    cancelBatch = useRef(false);
+  const [selected, setSelected] = useState<string[]>([]);
   const [passphrase, setPassphrase] = useState(""),
     [account, setAccount] = useState({
       origin: "",
@@ -95,6 +103,8 @@ export default function CareerWorkspace() {
   >([]);
   const modeRef = useRef(demo);
   modeRef.current = demo;
+  const batch = queue.status === "running" || queue.status === "paused";
+  const fitFor = (job: JobOffer) => profile ? matchJob(job, profile) : null;
   async function api<T>(
     path: string,
     method = "GET",
@@ -111,9 +121,17 @@ export default function CareerWorkspace() {
   }
   async function load(resetProfile = false) {
     const currentMode = demo;
-    const value = await api<CareerSnapshot>("/bootstrap");
+    const [value, queueValue] = await Promise.all([
+      api<CareerSnapshot>("/bootstrap"),
+      api<CareerQueueSnapshot>("/queue"),
+    ]);
     if (currentMode !== modeRef.current) return;
     setData(value);
+    setQueue(queueValue);
+    setSelected((ids) => ids.filter((id) => {
+      const item = queueValue.items.find((candidate) => candidate.applicationId === id);
+      return !item || item.status !== "submitted";
+    }));
     if (resetProfile) setProfile(structuredClone(value.profile));
     setResumeId((id) =>
       value.resumes.some((r) => r.id === id) ? id : value.resumes[0]?.id || "",
@@ -125,7 +143,6 @@ export default function CareerWorkspace() {
     setDetail(null);
     setSelected([]);
     setError("");
-    cancelBatch.current = true;
     load(true).catch((e) => setError(e.message));
     apiFetch(`/api/bootstrap?demo=${demo ? 1 : 0}`)
       .then((r) => r.json())
@@ -139,7 +156,7 @@ export default function CareerWorkspace() {
     );
     return () => clearInterval(timer);
   }, [demo]);
-  async function action(fn: () => Promise<unknown>, message = "Enregistré.") {
+  async function action(fn: () => Promise<unknown>, message = "Enregistré."): Promise<boolean> {
     setBusy(true);
     setError("");
     setNotice("");
@@ -147,8 +164,10 @@ export default function CareerWorkspace() {
       const result = await fn();
       await load();
       setNotice(typeof result === "string" ? result : message);
+      return true;
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+      return false;
     } finally {
       setBusy(false);
     }
@@ -160,8 +179,6 @@ export default function CareerWorkspace() {
     });
   }
   async function runBatch() {
-    cancelBatch.current = false;
-    setBatch(true);
     setError("");
     try {
       const latest = await api<CareerSnapshot>("/bootstrap");
@@ -175,29 +192,16 @@ export default function CareerWorkspace() {
         ),
       );
       setSelected(ids);
-      for (const id of ids) {
-        if (cancelBatch.current) break;
-        await run(id, "submit");
-        let result: Application;
-        do {
-          await new Promise((r) => setTimeout(r, 650));
-          result = await api<Application>(`/applications/${id}`);
-          await load();
-        } while (active(result));
-        if (result.state === "submitted")
-          setSelected((items) => items.filter((item) => item !== id));
-        else {
-          setNotice(
-            `Lot arrêté : ${states[result.state]}. Ouvrez la candidature pour continuer.`,
-          );
-          break;
-        }
-      }
+      if (!ids.length) return;
+      const created = await api<CareerQueueSnapshot>("/queue", "POST", {
+        applicationIds: ids,
+        mode: "submit",
+        ...(credentialId ? { credentialId } : {}),
+      });
+      setQueue(created);
+      setNotice("File enregistrée sur cet ordinateur. Elle s’arrête au premier blocage et sa progression reste disponible après fermeture de la fenêtre.");
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBatch(false);
-      await load();
     }
   }
   async function upload(file: File) {
@@ -229,6 +233,8 @@ export default function CareerWorkspace() {
     );
   const current = data?.applications.find((a) => a.id === detail),
     currentJob = current && data ? labelJob(data, current) : undefined;
+  const queueApplication = data?.applications.find((a) => a.id === queue.activeApplicationId);
+  const queueJob = queueApplication && data ? labelJob(data, queueApplication) : undefined;
   const runnable =
     data?.applications.filter(
       (a) =>
@@ -328,7 +334,6 @@ export default function CareerWorkspace() {
           <button
             disabled={busy || batch || !!data?.applications.some(active)}
             onClick={() => {
-              cancelBatch.current = true;
               localStorage.setItem("anima-demo", demo ? "0" : "1");
               setDemo(!demo);
               setCredentialId("");
@@ -571,6 +576,7 @@ export default function CareerWorkspace() {
                       ))}
                       {data.applications
                         .filter((a) => a.nextActionAt && a.outcome === "active")
+                        .sort((a, b) => Date.parse(a.nextActionAt) - Date.parse(b.nextActionAt))
                         .slice(0, 3)
                         .map((a) => (
                           <button
@@ -585,7 +591,10 @@ export default function CareerWorkspace() {
                               <strong>
                                 Relance · {labelJob(data, a)?.company}
                               </strong>
-                              <small>{date(a.nextActionAt)}</small>
+                            <small>
+                              {Date.parse(a.nextActionAt) < Date.now() ? "En retard · " : "À venir · "}
+                              {date(a.nextActionAt)}
+                            </small>
                             </span>
                             <span>◷</span>
                           </button>
@@ -655,6 +664,34 @@ export default function CareerWorkspace() {
                         Importer les offres ↗
                       </button>
                     </form>
+                    <div className="cw-section-head cw-saved-source-head">
+                      <div>
+                        <h2>Sources enregistrées</h2>
+                        <small className="cw-muted">Collecte publique en lecture seule pendant que l’application est ouverte. Les offres absentes ne sont jamais supprimées automatiquement.</small>
+                      </div>
+                    </div>
+                    <form className="cw-inline cw-source-save" onSubmit={(e) => {
+                      e.preventDefault();
+                      action(async () => {
+                        const label = sourceName.trim() || new URL(source).hostname;
+                        await api("/sources", "POST", { label, url: source, cadenceHours: sourceCadence });
+                        setSourceName("");
+                      }, "Source enregistrée ou mise à jour. Les offres déjà importées sont conservées.");
+                    }}>
+                      <label>Nom de la source<input value={sourceName} onChange={(e) => setSourceName(e.target.value)} placeholder="Ex. Équipe produit — Greenhouse" /></label>
+                      <label>Rythme<select value={sourceCadence} onChange={(e) => setSourceCadence(Number(e.target.value))}><option value={6}>Toutes les 6 h</option><option value={12}>Toutes les 12 h</option><option value={24}>Chaque jour</option><option value={168}>Chaque semaine</option></select></label>
+                      <button disabled={demo || busy || !source} type="submit">Enregistrer cette source</button>
+                    </form>
+                    {data.sources.length > 0 && <div className="cw-source-list">{data.sources.map((saved) => (
+                      <article className="cw-source-row" key={saved.id}>
+                        <div><strong>{saved.label}</strong><small className="cw-muted">{saved.url}</small><small className="cw-muted">{saved.status === "running" ? "Collecte en cours…" : saved.status === "succeeded" ? `${saved.lastFound} trouvée(s) · ${saved.lastNew} nouvelle(s) · ${saved.lastUpdated} modifiée(s)` : saved.status === "failed" ? `Échec : ${saved.lastError}` : "Aucune collecte réussie"}{saved.lastRunAt && saved.status !== "running" ? ` · Dernière collecte ${date(saved.lastRunAt)}` : ""}{saved.status !== "running" ? ` · ${saved.enabled ? `Prochaine collecte ${date(saved.nextRunAt)}` : "En pause"}` : ""}</small></div>
+                        <div className="cw-source-actions">
+                          <button disabled={busy || saved.status === "running"} onClick={() => action(() => api(`/sources/${saved.id}/run`, "POST", {}), "Collecte terminée.")}>Actualiser</button>
+                          <button disabled={busy || saved.status === "running"} onClick={() => action(() => api(`/sources/${saved.id}`, "PATCH", { enabled: !saved.enabled }), saved.enabled ? "Source mise en pause." : "Source réactivée.")}>{saved.enabled ? "Pause" : "Reprendre"}</button>
+                          <button disabled={busy || saved.status === "running"} onClick={() => { if (window.confirm(`Supprimer la source « ${saved.label} » ? Les offres déjà collectées restent enregistrées.`)) action(() => api(`/sources/${saved.id}`, "DELETE"), "Source supprimée."); }}>Supprimer</button>
+                        </div>
+                      </article>
+                    ))}</div>}
                     <details className="cw-details">
                       <summary>Ajouter une offre avec son lien</summary>
                       <form
@@ -715,7 +752,12 @@ export default function CareerWorkspace() {
                   </section>
                   {profileTools}
                   <div className="cw-section-head">
-                    <h2>Votre sélection</h2>
+                    <div>
+                      <h2>Votre sélection</h2>
+                      <small className="cw-muted">
+                        Le classement compare les intitulés, lieux et compétences renseignés. Il aide au tri, sans vérifier les critères de l’employeur.
+                      </small>
+                    </div>
                     <input
                       className="cw-search"
                       aria-label="Rechercher une offre"
@@ -731,6 +773,10 @@ export default function CareerWorkspace() {
                           .toLowerCase()
                           .includes(query.toLowerCase()),
                       )
+                      .sort((a, b) => {
+                        const score = (fitFor(b)?.score ?? -1) - (fitFor(a)?.score ?? -1);
+                        return score || b.discoveredAt.localeCompare(a.discoveredAt);
+                      })
                       .map((j) => (
                         <article className="cw-panel cw-job" key={j.id}>
                           <div className="cw-section-head">
@@ -740,12 +786,18 @@ export default function CareerWorkspace() {
                             <span className="cw-pill">
                               {new URL(j.url).hostname}
                             </span>
+                            {fitFor(j) && (
+                              <span className="cw-fit" title={fitFor(j)!.reasons.join(" · ")}>
+                                {fitFor(j)!.score}% correspondance
+                              </span>
+                            )}
                           </div>
                           <h2>{j.title}</h2>
                           <p>
                             {j.company} <span>·</span>{" "}
                             {j.location || "Lieu non précisé"}
                           </p>
+                          <small className="cw-muted">Collectée le {date(j.discoveredAt)}</small>
                           <div className="cw-job-description">
                             {j.description ||
                               "Consultez la source pour le détail de cette offre."}
@@ -837,17 +889,41 @@ export default function CareerWorkspace() {
                     >
                       Postuler au lot ({selected.length}) ↗
                     </button>
-                    {batch && (
+                    {queue.status === "running" && (
                       <button
-                        onClick={() => {
-                          cancelBatch.current = true;
-                          setNotice(
-                            "Le lot s’arrêtera après la candidature en cours.",
-                          );
-                        }}
-                      >
-                        Arrêter le lot
-                      </button>
+                        disabled={busy}
+                        onClick={() => action(
+                          () => api<CareerQueueSnapshot>("/queue/pause", "POST", {}),
+                          "La file s’arrêtera après la candidature en cours.",
+                        )}
+                      >Mettre en pause</button>
+                    )}
+                    {queue.status === "paused" && (
+                      <>
+                        <button
+                          disabled={busy || !!queue.activeApplicationId}
+                          onClick={() => action(
+                            () => api<CareerQueueSnapshot>("/queue/resume", "POST", {}),
+                            "Reprise explicite de la file lancée.",
+                          )}
+                        >Reprendre la file</button>
+                        <button
+                          disabled={busy || !!queue.activeApplicationId}
+                          onClick={() => {
+                            if (window.confirm("Abandonner ce lot ? Les candidatures suivantes ne seront pas envoyées; vous pourrez les sélectionner dans un nouveau lot.")) {
+                              void action(() => api<CareerQueueSnapshot>("/queue/cancel", "POST", {}), "Lot abandonné.");
+                            }
+                          }}
+                        >Abandonner le lot</button>
+                      </>
+                    )}
+                    {queue.items.length > 0 && (
+                      <p className="cw-muted" aria-live="polite">
+                        {queue.items.filter((item) => item.status === "submitted").length} / {queue.items.length} envoyée(s)
+                        {queue.activeApplicationId ? ` · ${queueJob?.title || "Candidature en cours"}` : ""}
+                        {queue.lastError ? ` · ${queue.lastError}` : ""}
+                        {queue.status === "completed" ? " · Lot terminé." : queue.status === "cancelled" ? " · Lot abandonné." : ""}
+                      </p>
                     )}
                   </div>
                   <div className="cw-applications">
@@ -1598,6 +1674,33 @@ export default function CareerWorkspace() {
             {current.lastError && (
               <p className="cw-callout">{current.lastError}</p>
             )}
+            {data.manualSessionApplicationId === current.id && current.state !== "uncertain" && (
+              <div className="cw-callout" role="status">
+                Le portail reste ouvert dans Chromium. Si l’étape peut être terminée sur cette même origine, intervenez vous-même, vérifiez le formulaire, puis reprenez ici. Les requêtes tierces et les changements d’origine restent bloqués; certains portails ne peuvent donc pas être repris ainsi.
+                <button
+                  className="cw-primary"
+                  disabled={busy || demo || batch}
+                  onClick={() => action(
+                    () => run(current.id, "submit"),
+                    "Session reprise. Le moteur vérifie les champs avant le clic d’envoi.",
+                  )}
+                >Reprendre et soumettre la candidature</button>
+                <button
+                  className="cw-secondary"
+                  disabled={busy || queue.status === "running"}
+                  onClick={() => action(
+                    () => api("/manual-session/close", "POST", {}),
+                    "Session navigateur fermée.",
+                  )}
+                >Fermer la session navigateur</button>
+              </div>
+            )}
+            {data.manualSessionApplicationId === current.id && current.state === "uncertain" && (
+              <div className="cw-callout" role="status">
+                La page de confirmation reste ouverte pour vérification. Aucune nouvelle soumission ne sera lancée; renseignez la vérification ci-dessous après avoir contrôlé le portail.
+                <button className="cw-secondary" disabled={busy || queue.status === "running"} onClick={() => action(() => api("/manual-session/close", "POST", {}), "Session navigateur fermée.")}>Fermer la session navigateur</button>
+              </div>
+            )}
             {current.receipt && (
               <div className="cw-receipt">
                 <strong>✓ Candidature reçue</strong>
@@ -1835,6 +1938,14 @@ export default function CareerWorkspace() {
                 />
               </label>
             </section>
+            <CareerResponseLog
+              applicationId={current.id}
+              responses={data.responses.filter((response) => response.applicationId === current.id)}
+              busy={busy}
+              formatDate={date}
+              onSave={(input) => action(() => api(`/applications/${current.id}/responses`, "POST", input), "Réponse ajoutée au suivi local.")}
+              onDelete={(responseId) => action(() => api(`/applications/${current.id}/responses/${responseId}`, "DELETE"), "Entrée supprimée. Vous pouvez la ressaisir.")}
+            />
             <section>
               <h3>Historique vérifiable</h3>
               <div className="cw-timeline">
