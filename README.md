@@ -18,6 +18,8 @@ pnpm start
 
 Anima Connect peut aussi être installée comme application Windows x64. Elle ouvre l’interface depuis les fichiers installés et appelle son moteur local par IPC : **aucun serveur web ni port localhost n’est lancé**. SQLite et le profil de navigation Playwright sont conservés dans le dossier utilisateur Windows ; Chromium est inclus dans l’installation.
 
+Dans l’onglet Offres, vous pouvez enregistrer des tableaux publics Greenhouse, Lever ou des pages avec données structurées, choisir une fréquence de collecte (6 heures à une semaine), actualiser une source ou la mettre en pause. Les collectes sont en lecture seule et s’exécutent lorsque l’application est ouverte; les offres absentes ne sont pas automatiquement supprimées. Les sources enregistrées sont locales et incluses dans la sauvegarde.
+
 Pour télécharger l’installateur depuis GitHub, ouvre l’exécution réussie du workflow **Verify Anima Connect** dans l’onglet *Actions*, puis télécharge l’artefact **anima-connect-windows**. Décompresse-le et lance `Anima Connect Setup 0.2.0.exe`.
 
 Pour créer l’installateur localement sous Windows avec Node.js 24 et pnpm :
@@ -36,10 +38,10 @@ Ouvrir [Anima Connect](http://127.0.0.1:4174). Pour développer : `pnpm dev`, pu
 1. **Profil & CV** : enregistrer identité, coordonnées, parcours, préférences, réponses personnelles et fichiers PDF/DOCX (10 Mio maximum). Choisir un CV selon l'offre.
 2. **Comptes carrière** : créer un coffre avec une phrase secrète de 12 caractères minimum et enregistrer les comptes existants des portails. L'origine HTTPS doit correspondre exactement au site de connexion. La phrase n'est pas enregistrée ; le coffre se verrouille au redémarrage.
 3. **Offres** : importer un tableau Greenhouse/Lever ou une page `JobPosting` JSON-LD. Import dédoublonné, 200 offres maximum. Ajout direct d'une URL également disponible.
-4. **Candidatures** : choisir offre et CV. **Préparer sans envoyer** parcourt le formulaire sans clic final. **Postuler automatiquement** lance Chromium, se connecte si nécessaire, remplit les champs reconnus, transmet le fichier choisi, avance dans les étapes et effectue l'envoi final.
+4. **Candidatures** : les offres sont triées par adéquation indicative au profil (titre, lieu, télétravail, compétences renseignées) et date de collecte. Choisir l'offre et le CV. **Préparer sans envoyer** parcourt le formulaire sans clic final. **Postuler automatiquement** lance Chromium, se connecte si nécessaire, remplit les champs reconnus, transmet le fichier choisi, avance dans les étapes et effectue l'envoi final.
 5. Le reçu visible est enregistré. Sans preuve après clic, la candidature devient **Envoi à vérifier** ; tout nouvel envoi reste bloqué jusqu'à une vérification humaine documentée.
-6. Un **lot sélectionné** est exécuté séquentiellement et s'arrête au premier blocage. Les candidatures envoyées quittent la sélection. L'arrêt du lot termine la candidature en cours puis interrompt le lot.
-7. Le dashboard calcule ses chiffres depuis SQLite. Notes, relances et résultats métier (entretien, offre, refus) se renseignent dans le suivi. Les réponses des employeurs ne sont pas importées depuis une messagerie.
+6. Un **lot sélectionné** est enregistré dans SQLite et exécuté séquentiellement. Sa progression survit au rechargement de l'interface; l'application ne reprend pas la file seule au démarrage. Elle s'arrête au premier blocage, garde les candidatures suivantes en attente, et demande une reprise explicite. L'arrêt termine la candidature en cours puis interrompt le lot.
+7. Le dashboard calcule ses chiffres depuis SQLite. Notes, relances et résultats métier (entretien, offre, refus) se renseignent dans le suivi. Une réponse employeur peut être consignée manuellement avec sa date, son canal, un résumé, la prochaine étape et un brouillon local; aucune messagerie n'est synchronisée et aucun brouillon n'est envoyé.
 
 ### Automatique et humain
 
@@ -48,11 +50,11 @@ Ouvrir [Anima Connect](http://127.0.0.1:4174). Pour développer : `pnpm dev`, pu
 | Ressources      | Réutilisation profil/CV/réponses        | Renseigner les faits et choisir le CV     |
 | Découverte      | Greenhouse/Lever/JSON-LD, dédoublonnage | Fournir la source et choisir les offres   |
 | Connexion       | Compte du coffre, origine exacte        | Compte existant et coffre déverrouillé    |
-| Candidature     | Champs reconnus, CV, étapes, clic final | Question inconnue, CAPTCHA/MFA, ambiguïté |
+| Candidature     | Champs reconnus, CV, étapes, clic final | Question inconnue, CAPTCHA/MFA, ambiguïté; l'utilisateur reprend la session Chromium après son intervention |
 | Preuve et suivi | Reçu, dates, historique, métriques      | Envoi incertain et réponse employeur      |
 | LinkedIn        | Lecture page ouverte, brouillons, suivi | Connexion, choix/import et envoi LinkedIn |
 
-Les formulaires HTML avec champs libellés et boutons reconnus sont pris en charge. Widgets propriétaires, inscriptions à de nouveaux comptes, SSO, CAPTCHA, MFA et parcours ambigus déclenchent un arrêt explicite. Le moteur n'invente ni faits ni consentements. Les tests ne prouvent pas la compatibilité avec tous les sites réels ; aucune candidature n'a été envoyée à un employeur pendant les vérifications.
+Les formulaires HTML avec champs libellés et boutons reconnus sont pris en charge. Widgets propriétaires, inscriptions à de nouveaux comptes, SSO, CAPTCHA, MFA et parcours ambigus déclenchent un arrêt explicite. Chromium reste ouvert pour une intervention humaine; la même session peut être reprise si le portail fonctionne sur cette origine. Les requêtes tierces et changements d'origine restent bloqués, ce qui peut empêcher certains challenges. Pour une candidature réelle, le DNS public est épinglé à l'IPv4 vérifiée dans Chromium afin d'éviter une nouvelle résolution non contrôlée. La file peut être abandonnée après mise en pause et fin du parcours courant. Le moteur n'invente ni faits ni consentements. Les tests ne prouvent pas la compatibilité avec tous les sites réels ; aucune candidature n'a été envoyée à un employeur pendant les vérifications.
 
 ## Prospection LinkedIn
 
@@ -73,7 +75,7 @@ pnpm build
 pnpm test
 ```
 
-La suite utilise de vrais serveurs carrière fictifs et Chromium : PDF/DOCX et SHA-256, profil, coffre, origine des comptes, préparation sans envoi, formulaires simples/multipages, redirection ATS, champs inconnus, contrôles de sécurité, reçu, incertitude, interruption, absence de double envoi, API et interface desktop/mobile. Captures dans `artifacts/career-ui/`. La CI Windows exécute build/tests et conserve les captures.
+La suite utilise de vrais serveurs carrière fictifs et Chromium : PDF/DOCX et SHA-256, profil, coffre, origine des comptes, préparation sans envoi, formulaires simples/multipages, redirection ATS, champs inconnus, contrôles de sécurité, reçu, incertitude, interruption, absence de double envoi, sources récurrentes, journal de réponse local, API et interface desktop/mobile. Captures dans `artifacts/career-ui/`. La CI Windows exécute build/tests et conserve les captures.
 
 Les tests démarrent une base temporaire distincte. `ANIMA_TEST_MODE=1` autorise uniquement les origines HTTP loopback dans `CAREER_TEST_ORIGINS`. Ces options ne peuvent pas venir d'une requête UI. `ANIMA_DATA_DIR` choisit le dossier de données ; `PORT` le port HTTP ; `CAREER_HEADLESS=1` masque Chromium pendant les tests.
 
@@ -81,7 +83,7 @@ Les tests démarrent une base temporaire distincte. `ANIMA_TEST_MODE=1` autorise
 
 - `server/career-store.ts` : profil, fichiers, offres, états et historique.
 - `server/vault.ts` : chiffrement et contrôle d'origine.
-- `server/job-discovery.ts` : sources publiques, requêtes bornées, protection des adresses privées.
+- `server/job-discovery.ts`, `server/network-safety.ts` : sources publiques, requêtes bornées, refus des plages privées/spéciales et épinglage DNS Chromium pour limiter le DNS rebinding.
 - `server/career-browser.ts` : connexion, formulaires, fichiers, étapes et reçu.
 - `server/career-runner.ts` : exécution exclusive, marqueur durable avant clic final.
 - `server/career-api.ts` : API validée ; `server/index.ts` : intégration locale.

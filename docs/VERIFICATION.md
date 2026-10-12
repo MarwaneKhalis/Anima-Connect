@@ -1,4 +1,6 @@
-# Vérification — 6 octobre 2026
+# Vérification — cycle du 12 octobre 2026
+
+Les résultats du 6 octobre sont conservés comme historique; le cycle courant du 12 octobre est décrit à la fin.
 
 ## Résultat local
 
@@ -48,3 +50,16 @@ Les captures proviennent d'une exécution réelle sur données synthétiques. El
 ## Portée des résultats
 
 Aucune candidature de test n'a été envoyée à un employeur réel. La réussite sur les fixtures ne certifie pas tous les portails de recrutement. Les contrôles CAPTCHA/MFA, SSO, nouveaux comptes et formulaires propriétaires non reconnus demandent une intervention. La prospection LinkedIn garde l'envoi manuel de la version précédente ; les résultats métier des candidatures se renseignent manuellement. Ces limites sont visibles dans l'interface et décrites dans le README.
+
+## Cycle produit — 12 octobre 2026
+
+- `pnpm build` : réussi après l'intégration de la file persistante, de l'adéquation indicative au profil et de la reprise manuelle de session Chromium.
+- Suite complète après corrections de la file, de la reprise, du scoring, du contrôle réseau, des sources enregistrées et du journal de réponses : **72 tests réussis, 0 échec**. Une première exécution à 65 tests a révélé qu'une file abandonnée devait également fermer sa session navigateur; ce comportement a été corrigé et couvert. La suppression d'une réponse est couverte pour l'effacement de sa date de suivi et la préservation d'une date modifiée ensuite.
+- Vérification réseau ajoutée : les plages privées, réservées, mappées IPv4/IPv6 et de documentation sont rejetées. Pour un site réel, Chromium reçoit une règle de résolution épinglant l'IPv4 publique validée, afin d'éviter une seconde résolution vulnérable au DNS rebinding. Une redirection vers une autre origine est bloquée; les seules redirections inter-origines restent celles entre origines fixtures explicitement autorisées par les tests.
+- La reprise CAPTCHA, les réponses manquantes, la fermeture de session et la persistance de la file ont été vérifiées sur des fixtures loopback. Aucun formulaire employeur n'a été rempli ou soumis.
+- Sources enregistrées : API de création/liste/pause/suppression, cadence, compteurs ajout/modification, erreur conservée et réponse vide sans expiration des offres existantes sont couverts. Le scheduler lit une source à la fois et récupère une collecte interrompue au redémarrage.
+- Réponse employeur : API/SQLite et parcours formulaire UI automatisé vérifiés; l'entrée conserve canal, date, résumé, prochaine étape et brouillon sans accès à une messagerie ni envoi du brouillon. Le journal permet de supprimer une entrée erronée et garde un événement d'audit; l'entrée peut ensuite être ressaisie.
+- Une page de candidature publique Lever de Slate a été consultée en lecture seule : [page observée](https://jobs.lever.co/slate/557fe4ab-d292-4069-8c63-36752f3da91d/apply). Aucun champ n'a été rempli.
+- `pnpm desktop:dist` a construit l'installateur Windows x64 et le répertoire `win-unpacked` à partir des changements de ce cycle. `pnpm desktop:smoke` pointe par défaut vers `release/win-unpacked/Anima Connect.exe`; il n'a donc pas testé l'installateur NSIS dans un profil installé propre. Ce lancement unpacked, depuis le worktree Codex, a produit la sortie Electron `install_dir_access.cc:52` indiquant que le processus sandboxé ne peut pas lire ce répertoire, dont l'ACL a une entrée AppContainer sans entrée `ALL APPLICATION PACKAGES`. Les ACE de lecture/exécution ajoutées uniquement aux sorties générées et à une copie temporaire n'ont pas supprimé ce message. Aucun changement d'ACL système ni désactivation du sandbox n'a été effectué.
+
+La capture fournie affiche `STATUS_BREAKPOINT` / `0x80000003`. Ce code seul n'identifie pas la cause, et la sortie du smoke unpacked ne prouve pas que le même contrôle a causé l'exception de la capture. Le démarrage de l'application réellement installée, le lancement/extraction de Chromium carrière, la sauvegarde/restauration et la persistance sous `userData` restent à vérifier depuis un profil Windows approprié. Le paquet compile; son fonctionnement installé n'est pas certifié.

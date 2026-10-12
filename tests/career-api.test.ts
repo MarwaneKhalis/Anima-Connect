@@ -406,6 +406,7 @@ test("career HTTP API drives isolated real-store application runs", async (t) =>
               /work authorization/i.test(field.label),
             ),
           );
+        assert.equal((await app.json("/api/career/manual-session/close", {})).response.status, 200);
       }
     },
   );
@@ -448,6 +449,7 @@ test("career HTTP API drives isolated real-store application runs", async (t) =>
       );
       assert.equal(replay.response.status, 409);
       assert.equal(app.fixture.submissions.length, before + 1);
+      assert.equal((await app.json("/api/career/manual-session/close", {})).response.status, 200);
     },
   );
 
@@ -550,6 +552,7 @@ test("career HTTP API drives isolated real-store application runs", async (t) =>
       assert.equal(blocked.state, "blocked", blocked.lastError);
       assert.equal(app.fixture.loginCount, loginsBefore);
       assert.equal(app.fixture.submissions.length, submissionsBefore);
+      assert.equal((await app.json("/api/career/manual-session/close", {})).response.status, 200);
     },
   );
 
@@ -652,4 +655,164 @@ test("career HTTP API drives isolated real-store application runs", async (t) =>
       assert.equal(safe.headers.get("cache-control"), "no-store");
     },
   );
+});
+
+test("persistent submit queue stops for input and resumes only explicitly", async (t) => {
+  const app = await startCareerTestServer();
+  t.after(() => app.close());
+  const profileSaved = await app.json("/api/career/profile", { firstName: "Ada", lastName: "Lovelace", email: "ada@example.test" }, "PUT");
+  assert.equal(profileSaved.response.status, 200);
+  const pdf = Buffer.from("%PDF-1.4\nQueue test CV\n%%EOF");
+  const uploaded = await app.json("/api/career/resumes", { name: "Queue CV", filename: "queue.pdf", mime: "application/pdf", base64: pdf.toString("base64") });
+  assert.equal(uploaded.response.status, 201);
+  const makeApplication = async (path: string, title: string) => {
+    const offer = await app.json("/api/career/jobs", { url: `${app.fixture.baseUrl}${path}`, title, company: "Fixture", location: "Paris" });
+    const created = await app.json("/api/career/applications", { jobId: offer.value.id, resumeId: uploaded.value.id });
+    assert.ok([200, 201].includes(created.response.status));
+    return created.value as Application;
+  };
+  const first = await makeApplication("/unknown", "Needs an answer");
+  const second = await makeApplication("/simple", "Simple application");
+  const initial = await app.json("/api/career/queue");
+  assert.equal(initial.response.status, 200);
+  assert.equal(initial.value.status, "idle");
+  const count = app.fixture.submissions.length;
+  const queued = await app.json("/api/career/queue", { applicationIds: [first.id, second.id], mode: "submit" });
+  assert.equal(queued.response.status, 202);
+  assert.deepEqual(queued.value.items.map((item: { applicationId: string }) => item.applicationId), [first.id, second.id]);
+  const stopped = await waitFor(() => app.json("/api/career/queue").then(x => x.value), q => q.status === "paused");
+  assert.equal(stopped.items[0].status, "blocked");
+  assert.equal(stopped.items[1].status, "queued");
+  assert.equal((await app.json(`/api/career/applications/${first.id}`)).value.state, "needs_input");
+  assert.equal((await app.json(`/api/career/applications/${second.id}`)).value.state, "draft");
+  assert.equal(app.fixture.submissions.length, count);
+  const duplicate = await app.json("/api/career/queue", { applicationIds: [second.id], mode: "submit" });
+  assert.equal(duplicate.response.status, 409);
+
+  const patched = await app.json(`/api/career/applications/${first.id}`, { answers: { "Work authorization": "Yes" } }, "PATCH");
+  assert.equal(patched.response.status, 200);
+  assert.equal(patched.value.answers["Work authorization"], "Yes");
+  const resumed = await app.json("/api/career/queue/resume", {});
+  assert.equal(resumed.response.status, 202);
+  const complete = await waitFor(() => app.json("/api/career/queue").then(x => x.value), q => q.status === "completed" || (q.status === "paused" && q.items[0]?.updatedAt !== stopped.items[0]?.updatedAt));
+  assert.equal(complete.status, "completed", JSON.stringify({ queue: complete, application: (await app.json(`/api/career/applications/${first.id}`)).value }));
+  assert.deepEqual(complete.items.map((item: { status: string }) => item.status), ["submitted", "submitted"]);
+  assert.equal(app.fixture.submissions.length, count + 2);
+  assert.equal((await app.json(`/api/career/applications/${first.id}`)).value.state, "submitted");
+  assert.equal((await app.json(`/api/career/applications/${second.id}`)).value.state, "submitted");
+  assert.equal((await app.json("/api/career/queue/resume", {})).response.status, 409);
+});
+
+test("queue pause waits for the active fixture run and leaves later items queued", async (t) => {
+  const app = await startCareerTestServer();
+  t.after(() => app.close());
+  await app.json("/api/career/profile", { firstName: "Ada", lastName: "Lovelace", email: "ada@example.test" }, "PUT");
+  const pdf = Buffer.from("%PDF-1.4\nQueue pause CV\n%%EOF");
+  const resume = await app.json("/api/career/resumes", { name: "CV", filename: "pause.pdf", mime: "application/pdf", base64: pdf.toString("base64") });
+  const create = async (path: string) => {
+    const job = await app.json("/api/career/jobs", { url: `${app.fixture.baseUrl}${path}`, title: path, company: "Fixture" });
+    const application = await app.json("/api/career/applications", { jobId: job.value.id, resumeId: resume.value.id });
+    return application.value as Application;
+  };
+  const first = await create("/slow-submit");
+  const second = await create("/simple");
+  const count = app.fixture.submissions.length;
+  await app.json("/api/career/queue", { applicationIds: [first.id, second.id], mode: "submit" });
+  await waitFor(() => app.json("/api/career/queue").then(x => x.value), q => q.activeApplicationId === first.id);
+  const pausedRequest = await app.json("/api/career/queue/pause", {});
+  assert.equal(pausedRequest.response.status, 200);
+  assert.equal(pausedRequest.value.pauseRequested, true);
+  const paused = await waitFor(() => app.json("/api/career/queue").then(x => x.value), q => q.status === "paused" && !q.activeApplicationId);
+  assert.deepEqual(paused.items.map((item: { status: string }) => item.status), ["submitted", "queued"]);
+  assert.equal(app.fixture.submissions.length, count + 1);
+  const resumed = await app.json("/api/career/queue/resume", {});
+  assert.equal(resumed.response.status, 202);
+  const completed = await waitFor(() => app.json("/api/career/queue").then(x => x.value), q => q.status === "completed");
+  assert.deepEqual(completed.items.map((item: { status: string }) => item.status), ["submitted", "submitted"]);
+  assert.equal(app.fixture.submissions.length, count + 2);
+});
+
+test("paused queue can be explicitly abandoned before another batch", async (t) => {
+  const app = await startCareerTestServer();
+  t.after(() => app.close());
+  await app.json("/api/career/profile", { firstName: "Ada", lastName: "Lovelace", email: "ada@example.test" }, "PUT");
+  const pdf = Buffer.from("%PDF-1.4\nCancel queue CV\n%%EOF");
+  const resume = await app.json("/api/career/resumes", { name: "CV", filename: "cancel.pdf", mime: "application/pdf", base64: pdf.toString("base64") });
+  const create = async (path: string) => {
+    const job = await app.json("/api/career/jobs", { url: `${app.fixture.baseUrl}${path}`, title: path, company: "Fixture" });
+    const application = await app.json("/api/career/applications", { jobId: job.value.id, resumeId: resume.value.id });
+    return application.value as Application;
+  };
+  const blocked = await create("/unknown");
+  const later = await create("/simple");
+  await app.json("/api/career/queue", { applicationIds: [blocked.id, later.id], mode: "submit" });
+  await waitFor(() => app.json("/api/career/queue").then(x => x.value), q => q.status === "paused");
+  const abandoned = await app.json("/api/career/queue/cancel", {});
+  assert.equal(abandoned.response.status, 200);
+  assert.equal(abandoned.value.status, "cancelled");
+  assert.deepEqual(abandoned.value.items.map((item: { status: string }) => item.status), ["cancelled", "cancelled"]);
+  const fresh = await app.json("/api/career/queue", { applicationIds: [later.id], mode: "submit" });
+  assert.equal(fresh.response.status, 202);
+  const done = await waitFor(() => app.json("/api/career/queue").then(x => x.value), q => q.status === "completed");
+  assert.equal(done.items[0].applicationId, later.id);
+});
+
+test("submit queue uses the selected credential id without persisting its secret in the queue", async (t) => {
+  const app = await startCareerTestServer();
+  t.after(() => app.close());
+  await app.json("/api/career/profile", { firstName: "Ada", lastName: "Lovelace", email: "ada@example.test" }, "PUT");
+  await app.json("/api/career/vault/initialize", { passphrase: "fixture-private-phrase" });
+  const credential = await app.json("/api/career/credentials", { origin: new URL(app.fixture.baseUrl).origin, label: "Fixture", username: "applicant@example.test", password: "secret-pass" });
+  const pdf = Buffer.from("%PDF-1.4\nCredential queue CV\n%%EOF");
+  const resume = await app.json("/api/career/resumes", { name: "CV", filename: "credential.pdf", mime: "application/pdf", base64: pdf.toString("base64") });
+  const job = await app.json("/api/career/jobs", { url: `${app.fixture.baseUrl}/login-apply`, title: "Login application", company: "Fixture" });
+  const application = await app.json("/api/career/applications", { jobId: job.value.id, resumeId: resume.value.id });
+  const count = app.fixture.loginCount;
+  const queued = await app.json("/api/career/queue", { applicationIds: [application.value.id], mode: "submit", credentialId: credential.value.id });
+  assert.equal(queued.response.status, 202);
+  assert.equal(queued.value.items[0].credentialId, credential.value.id);
+  assert.equal(JSON.stringify(queued.value).includes("secret-pass"), false);
+  const complete = await waitFor(() => app.json("/api/career/queue").then(x => x.value), q => q.status === "completed");
+  assert.equal(complete.items[0].status, "submitted");
+  assert.equal(app.fixture.loginCount, count + 1);
+});
+
+test("saved career sources can be listed, paused, manually refreshed and deleted", async (t) => {
+  const app = await startCareerTestServer();
+  t.after(() => app.close());
+  const created = await app.json("/api/career/sources", { label: "Fixture board", url: app.fixture.baseUrl, cadenceHours: 24 });
+  assert.equal(created.response.status, 201);
+  assert.equal(created.value.enabled, true);
+  assert.equal(created.value.cadenceHours, 24);
+  const bootstrap = await app.json("/api/career/bootstrap");
+  assert.equal(bootstrap.value.sources[0].id, created.value.id);
+  const paused = await app.json(`/api/career/sources/${created.value.id}`, { enabled: false }, "PATCH");
+  assert.equal(paused.value.enabled, false);
+  const run = await app.json(`/api/career/sources/${created.value.id}/run`, {}, "POST");
+  assert.equal(run.response.status, 409);
+  assert.equal(run.value.code, "source_disabled");
+  const deleted = await app.json(`/api/career/sources/${created.value.id}`, undefined, "DELETE");
+  assert.equal(deleted.response.status, 200);
+  assert.deepEqual((await app.json("/api/career/sources")).value, []);
+});
+
+test("employer reply logging stores a local reply draft and schedules its next action", async (t) => {
+  const app = await startCareerTestServer();
+  t.after(() => app.close());
+  const job = await app.json("/api/career/jobs", { url: "https://jobs.example.org/role/reply", title: "Engineer", company: "Example" });
+  const resume = await app.json("/api/career/resumes", { name: "CV", filename: "cv.pdf", mime: "application/pdf", base64: Buffer.from("%PDF-1.4\n%%EOF").toString("base64") });
+  const application = await app.json("/api/career/applications", { jobId: job.value.id, resumeId: resume.value.id });
+  const logged = await app.json(`/api/career/applications/${application.value.id}/responses`, { receivedAt: "2026-10-12T09:00:00.000Z", channel: "email", summary: "Invitation à un entretien.", nextStep: "Choisir un horaire", replyDraft: "Bonjour, merci pour votre invitation.", nextActionAt: "2026-10-13T09:00:00.000Z" });
+  assert.equal(logged.response.status, 201);
+  assert.equal(logged.value.replyDraft, "Bonjour, merci pour votre invitation.");
+  const bootstrap = await app.json("/api/career/bootstrap");
+  assert.equal(bootstrap.value.responses[0].id, logged.value.id);
+  const scoped = await app.json(`/api/career/applications/${application.value.id}/responses`);
+  assert.equal(scoped.value[0].id, logged.value.id);
+  const updated = await app.json(`/api/career/applications/${application.value.id}`);
+  assert.equal(updated.value.nextActionAt, "2026-10-13T09:00:00.000Z");
+  assert.equal(updated.value.state, "draft");
+  const removed = await app.json(`/api/career/applications/${application.value.id}/responses/${logged.value.id}`, undefined, "DELETE");
+  assert.equal(removed.response.status, 200);
+  assert.deepEqual((await app.json(`/api/career/applications/${application.value.id}/responses`)).value, []);
 });
